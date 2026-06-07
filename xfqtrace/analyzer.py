@@ -202,9 +202,10 @@ def detect_mem_copy(lines: list[TraceLine], window: int = 5) -> list[dict]:
     """检测连续内存拷贝模式（顺序递增地址的写操作）。"""
     results = []
     i = 0
-    while i < len(lines) - window:
-        chunk = lines[i:i + window]
-        writes = [tl for tl in chunk if any(op in tl.insn for op in ["str ", "stp ", "stur "])]
+    while i <= len(lines) - 3:  # 需要至少 3 行才可能有 3 次写
+        chunk_size = min(window, len(lines) - i)
+        chunk = lines[i:i + chunk_size]
+        writes = [tl for tl in chunk if (tl.insn.split()[0] if tl.insn else "") in STORE_OPS]
         if len(writes) >= 3:
             # 检查地址是否连续递增
             addrs = []
@@ -212,14 +213,25 @@ def detect_mem_copy(lines: list[TraceLine], window: int = 5) -> list[dict]:
                 m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", w.insn)
                 if not m:
                     break
-                reg = f"x{m.group(1)}"
-                if reg in w.regs_before:
-                    addrs.append(w.regs_before[reg])
-                elif reg in w.regs_after:
-                    # 当前指令写之前的寄存器值
-                    addrs.append(w.regs_after[reg])
+                reg = m.group(1)
+                if reg == "sp":
+                    reg_canon = "sp"
+                elif reg.startswith("w"):
+                    reg_canon = f"x{reg[1:]}"
                 else:
+                    reg_canon = reg
+                base = w.regs_before.get(reg_canon, w.regs_before.get(reg))
+                if base is None:
                     break
+                off_str = m.group(2)
+                offset = 0
+                if off_str:
+                    off_str = off_str.replace("#", "")
+                    try:
+                        offset = int(off_str, 16) if "0x" in off_str else int(off_str)
+                    except ValueError:
+                        offset = 0
+                addrs.append(base + offset)
             if len(addrs) >= 3:
                 # 检查是否递增
                 diffs = [addrs[k+1] - addrs[k] for k in range(len(addrs)-1)]
@@ -445,6 +457,9 @@ def slice_trace(path: str | Path,
                 fout.write(line)
                 written += 1
                 if max_lines and written >= max_lines:
+                    # 还需读完文件以获取准确行数
+                    remaining = sum(1 for _ in fin)
+                    total += remaining
                     break
 
     return {
@@ -732,7 +747,9 @@ LOAD_OPS = {"ldr", "ldp", "ldrb", "ldrh", "ldur", "ldurb", "ldurh", "ldrsw"}
 ALU_OPS = {"add", "sub", "eor", "and", "orr", "bic", "orn",
            "lsl", "lsr", "asr", "mul", "udiv", "sdiv",
            "csel", "csinc", "csinv", "csneg",
-           "mov", "mvn", "neg", "lslv", "lsrv", "asrv"}
+           "madd", "msub", "smull", "umull", "smulh", "umulh",
+           "movk", "adrp",
+           "mov", "mvn", "neg", "lslv", "lsrv", "asrv", "ror", "rorv"}
 
 
 # 提取指令中的寄存器操作数
@@ -926,6 +943,12 @@ def taint_analysis(
                         all_src_tags.update(_get_reg_tags(alt))
                 if all_src_tags:
                     _mark_reg(dest, all_src_tags, insn, line_no)
+            elif op == "movk" and all_regs:
+                # movk 会读取并修改目标寄存器，保留已有污点
+                dest = all_regs[0]
+                existing = _get_reg_tags(dest)
+                if existing:
+                    _mark_reg(dest, existing, insn, line_no)
             continue
 
         # ── 比较指令（cmp, cmn）：影响标志位 ──
