@@ -5,7 +5,11 @@
 ## 快速开始
 
 ```bash
+# 从 GitHub 安装
 pip install git+https://github.com/Orangechenx/xfqtrace-tools.git
+
+# 或直接从 Release 安装
+# pip install https://github.com/Orangechenx/xfqtrace-tools/releases/download/v1.3.0/xfqtrace_tools-1.3.0-py3-none-any.whl
 
 # 检查环境
 xfq doctor

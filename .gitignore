@@ -29,3 +29,4 @@ xfqtrace/_vendor/*/logs/
 
 # 临时 agent 文件
 xfqtrace-*.js
+release.sh
