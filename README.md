@@ -81,6 +81,7 @@ xfq mcp
 | `regdiff` | 寄存器变化热力图 — 统计寄存器变化情况 |
 | `mempat` | 内存访问模式检测 — 识别连续内存拷贝/置零 |
 | `branch` | 分支命中率分析 — 条件跳转统计 |
+| `taint` | 污点分析 — 标记输入，跟踪数据传播路径 |
 | **MCP** | |
 | `logcat` | 输出 logcat 监控命令 |
 | `mcp` | 启动 MCP Server |

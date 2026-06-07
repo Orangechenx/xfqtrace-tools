@@ -442,15 +442,27 @@ def grep(
 
         pc_range_tuple = None
         if pc_range:
-            parts = pc_range.split("-")
-            if len(parts) == 2:
-                pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
+            try:
+                parts = pc_range.split("-")
+                if len(parts) == 2:
+                    pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
+                else:
+                    raise ValueError
+            except ValueError:
+                print("错误: --pc-range 格式错误，应为 0xstart-0xend", file=sys.stderr)
+                raise typer.Exit(1)
 
         reg_filter = None
         if reg:
-            if "=" in reg:
-                r, v = reg.split("=", 1)
-                reg_filter = {r: int(v, 16) if v.startswith("0x") else int(v)}
+            try:
+                if "=" in reg:
+                    r, v = reg.split("=", 1)
+                    reg_filter = {r: int(v, 16) if v.startswith("0x") else int(v)}
+                else:
+                    print(f"警告: --reg 缺少 =，忽略过滤 (正确格式: x0=0x1234)", file=sys.stderr)
+            except ValueError:
+                print("错误: --reg 格式错误，应为 reg=value 如 x0=0x1234", file=sys.stderr)
+                raise typer.Exit(1)
 
         results = grep_func(paths=paths, pc_range=pc_range_tuple, opcode=opcode,
                            module=module, reg_filter=reg_filter, max_results=max_results)
@@ -489,13 +501,23 @@ def slice(
 
         pc_range_tuple = None
         if pc_range:
-            parts = pc_range.split("-")
-            if len(parts) == 2:
-                pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
+            try:
+                parts = pc_range.split("-")
+                if len(parts) == 2:
+                    pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
+                else:
+                    raise ValueError
+            except ValueError:
+                print("错误: --pc-range 格式错误，应为 0xstart-0xend", file=sys.stderr)
+                raise typer.Exit(1)
 
         line_range = None
         if line_start > 0 and line_end > 0:
             line_range = (line_start, line_end)
+        elif line_start > 0:
+            line_range = (line_start, 10**9)  # 无上限
+        elif line_end > 0:
+            line_range = (1, line_end)
 
         result = slice_trace(paths[0], output, pc_range=pc_range_tuple,
                             line_range=line_range, max_lines=max_lines)
@@ -669,9 +691,16 @@ def taint(
 
         mem_range = None
         if taint_mem:
-            parts = taint_mem.split("-")
-            if len(parts) == 2:
-                mem_range = (int(parts[0], 16), int(parts[1], 16))
+            try:
+                parts = taint_mem.split("-")
+                if len(parts) == 2:
+                    mem_range = (int(parts[0], 16), int(parts[1], 16))
+                else:
+                    print("错误: --taint-mem 格式错误，应为 0xstart-0xend", file=sys.stderr)
+                    raise typer.Exit(1)
+            except ValueError:
+                print("错误: --taint-mem 地址格式错误，需要使用十六进制如 0x7a000000-0x7a000100", file=sys.stderr)
+                raise typer.Exit(1)
 
         if not regs and not mem_range:
             print("错误: 请至少指定 --taint 或 --taint-mem", file=sys.stderr)

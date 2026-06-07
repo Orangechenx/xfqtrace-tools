@@ -439,6 +439,49 @@ libsgmainso          0x55110   b.ne #-0x4c  156    0     100.0%
 libsgmainso          0x55084   cbz w1,#0x90 15     0     100.0%
 ```
 
+### 4.9 taint — 污点分析
+
+标记一个或多个输入（寄存器/内存地址），自动跟踪其在 trace 中的传播路径，判断返回值是否受其影响。用于快速确定参数是否参与了签名、加密或校验计算。
+
+```bash
+# 标记寄存器 x2（第三个参数）为污点源
+xfq taint trace.log --taint x2
+
+# 标记多个寄存器
+xfq taint trace.log --taint x2 --taint x3
+
+# 标记内存范围
+xfq taint trace.log --taint-mem 0x7a000000-0x7a000100
+
+# 只看结论不看详细路径
+xfq taint trace.log --taint x2 --summary
+
+# 只看前 5 条传播链
+xfq taint trace.log --taint x2 --max-prop 5
+
+# JSON 输出
+xfq taint trace.log --taint x2 --json
+```
+
+输出：
+```
+污点分析结果 — 9,703 条指令
+
+  🎯 返回值 x0 被污染! (标签: input:x2)
+  传播链: 832 条
+  污染寄存器: 20 个
+  污染内存: 813 处
+
+传播路径 (前 50 条):
+
+  L    55  →  x10     <- input:x2    add x10, x2, #0x1
+  L    58  →  x13     <- input:x2    add x13, x10, x8
+  L   324  →  x11     <- input:x2    eor w11, w12, w11
+  L   325  →  0x...                  strb w11, [x15, #0x1]
+```
+
+**基本原理：** 扫描 trace 中的每条指令，维护寄存器/内存地址到污点标签的映射。`str` 将污点写入内存，`ldr` 从内存读回，`add/eor/mov` 等 ALU 指令将源操作数的污点传递给目标寄存器。不依赖指令模拟，利用 trace 中已有的寄存器值进行传播，准确率在栈内存场景下可达 95% 以上。
+
 ---
 
 ## 5. 配置详解

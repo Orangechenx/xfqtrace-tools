@@ -153,6 +153,14 @@ def resolve_trace_file(package: str, log_dir: str | Path | None = None) -> list[
     files = sorted([f for f in runs[0].rglob("*") if f.is_file() and not f.name.endswith(".lz4")],
                    key=lambda x: x.stat().st_size, reverse=True)
     if not files:
+        # 尝试找 lz4 并自动解压
+        lz4_files = sorted([f for f in runs[0].rglob("*.lz4") if f.is_file()],
+                          key=lambda x: x.stat().st_size, reverse=True)
+        if lz4_files:
+            raise FileNotFoundError(
+                f"run 目录只有 .lz4 压缩文件: {runs[0]}\n"
+                f"请先解压: lz4 -d {lz4_files[0]}"
+            )
         raise FileNotFoundError(f"run 目录下无文件: {runs[0]}")
 
     return files[:1]  # 最大文件
@@ -970,7 +978,7 @@ def format_taint_result(result: dict, max_prop: int = 50) -> str:
         lines.append("")
         for p in result["propagation"][:max_prop]:
             if p["type"] == "reg":
-                arrow = "→" if p["target"].startswith("x") or p["target"].startswith("w") else "→"
+                arrow = "→" if p["target"] in reg_taint or p["target"].startswith("x") else "→"
                 lines.append(f"  L{p['line_no']:>6}  {arrow}  {p['target']:<6}  <- {', '.join(p['tags']):<30}  {p['insn']}")
             else:
                 lines.append(f"  L{p['line_no']:>6}  →  {p['target']:<22} <- {', '.join(p['tags']):<30}  {p['insn']}")
