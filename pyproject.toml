@@ -29,9 +29,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-username/xfqtrace"
-Repository = "https://github.com/your-username/xfqtrace"
-Documentation = "https://github.com/your-username/xfqtrace#readme"
+Homepage = "https://github.com/Orangechenx/xfqtrace"
+Repository = "https://github.com/Orangechenx/xfqtrace"
+Documentation = "https://github.com/Orangechenx/xfqtrace#readme"
 
 [project.scripts]
 xfqtrace = "xfqtrace.cli:app"

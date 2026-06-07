@@ -24,10 +24,10 @@
 
 ## 1. 安装
 
-### 从 PyPI 安装（推荐）
+### 从 GitHub 安装（推荐）
 
 ```bash
-pip install xfqtrace
+pip install git+https://github.com/Orangechenx/xfqtrace.git
 ```
 
 安装后 `xfq` 和 `xfqtrace` 两个命令自动可用。
