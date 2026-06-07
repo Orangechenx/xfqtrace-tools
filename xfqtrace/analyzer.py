@@ -202,7 +202,7 @@ def detect_mem_copy(lines: list[TraceLine], window: int = 5) -> list[dict]:
             # 检查地址是否连续递增
             addrs = []
             for w in writes:
-                m = re.search(r"\[(?:x|w)(\d+)(?:,\s*(#[\-0-9x]+))?\]", w.insn)
+                m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", w.insn)
                 if not m:
                     break
                 reg = f"x{m.group(1)}"
@@ -288,10 +288,10 @@ def build_stack(paths: list[str | Path] | str | Path | None = None,
 
     raw_text = text
     if not raw_text and paths:
-        raw_text = paths[0].read_text(encoding="utf-8", errors="replace")
+        raw_text = paths[0].read_text(encoding="utf-8", errors="replace") if paths[0].stat().st_size > 0 else ""
 
-    if not raw_text:
-        raise ValueError("必须提供 paths、text 或 package")
+    if not raw_text or not raw_text.strip():
+        return []
 
     # 扫描调用/返回行（不依赖解析器，处理原始文本更快）
     stack = []
@@ -467,10 +467,15 @@ def stats(paths: list[str | Path] | str | Path | None = None,
 
     raw_text = text
     if not raw_text and paths:
-        raw_text = paths[0].read_text(encoding="utf-8", errors="replace")
+        raw_text = paths[0].read_text(encoding="utf-8", errors="replace") if paths[0].stat().st_size > 0 else ""
 
-    if not raw_text:
-        raise ValueError("必须提供 paths、text 或 package")
+    if not raw_text or not raw_text.strip():
+        return {
+            "total_instructions": 0,
+            "total_calls": 0,
+            "calls": [],
+            "top_opcodes": [],
+        }
 
     # 直接从文本解析更快
     call_counter: Counter = Counter()
@@ -590,21 +595,6 @@ def mempat(paths: list[str | Path] | str | Path | None = None,
             i += 1
             continue
 
-        # 提取写地址和目标寄存器
-        m = re.search(r"\[(x\d+|w\d+|sp)](?:,\s*(#[\-0-9x]+))?", insn)
-        if not m:
-            i += 1
-            continue
-
-        base_reg = m.group(1)
-        offset_str = m.group(2) or "#0"
-        try:
-            offset = int(offset_str.replace("#", ""), 16) if "0x" in offset_str else int(offset_str.replace("#", ""))
-        except ValueError:
-            offset = 0
-
-        base_addr = tl.regs_before.get(base_reg, 0)
-
         # 看连续几条是否地址递增
         seq = []
         for j in range(i, min(i + 20, len(lines))):
@@ -612,32 +602,31 @@ def mempat(paths: list[str | Path] | str | Path | None = None,
             ij = tj.insn
             if not any(op in ij for op in ["str ", "stp ", "stur "]):
                 break
-            mj = re.search(r"\[(x\d+|w\d+|sp)](?:,\s*(#[\-0-9x]+))?", ij)
+            mj = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", ij)
             if not mj:
                 break
             bj = tj.regs_before.get(mj.group(1), 0)
             try:
-                oj = int(mj.group(2).replace("#", ""), 16) if mj.group(2) and "0x" in mj.group(2) else int(mj.group(2).replace("#", "")) if mj.group(2) else 0
+                oj_str = mj.group(2) or "#0"
+                oj = int(oj_str.replace("#", ""), 16) if "0x" in oj_str else int(oj_str.replace("#", ""))
             except (ValueError, AttributeError):
                 oj = 0
-            seq.append({"insn": ij, "base": bj, "offset": oj, "line": tj.line_no})
-        else:
-            seq.append({"insn": ij, "base": bj, "offset": oj, "line": tj.line_no})
+            seq.append({"base": bj, "offset": oj, "line_no": tj.line_no, "idx": j})
 
-            if len(seq) >= 3:
-                # 检查递增
-                addrs = [s["base"] + s["offset"] for s in seq]
-                diffs = [addrs[k+1] - addrs[k] for k in range(len(addrs)-1)]
-                if all(d == diffs[0] for d in diffs):
-                    patterns.append({
-                        "type": "sequential_write",
-                        "start_line": seq[0]["line"],
-                        "end_line": seq[-1]["line"],
-                        "stride": diffs[0],
-                        "count": len(seq),
-                    })
-                    i = seq[-1]["line"] - lines[0].line_no
-                    continue
+        if len(seq) >= 3:
+            # 检查地址是否连续递增
+            addrs = [s["base"] + s["offset"] for s in seq]
+            diffs = [addrs[k+1] - addrs[k] for k in range(len(addrs)-1)]
+            if all(d == diffs[0] for d in diffs):
+                patterns.append({
+                    "type": "sequential_write",
+                    "start_line": seq[0]["line_no"],
+                    "end_line": seq[-1]["line_no"],
+                    "stride": diffs[0],
+                    "count": len(seq),
+                })
+                i = seq[-1]["idx"] + 1  # 跳过整个连续的块
+                continue
 
         i += 1
 
