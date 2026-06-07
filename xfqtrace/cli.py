@@ -318,6 +318,271 @@ def add(
     print(f"  xfqtrace run -p cn.damai --execute")
 
 
+# ── 分析命令 ──────────────────────────────────────────────────
+
+TRACE_FILE_HELP = "trace 日志文件路径（不传则自动找指定包的最新日志）"
+PKG_OR_FILE_HELP = "包名或 trace 文件路径（不传则自动找最新日志）"
+
+
+def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: str | None) -> list[Path]:
+    """统一解析 trace 文件路径。"""
+    from pathlib import Path
+
+    if package_or_path and Path(package_or_path).exists():
+        return [Path(package_or_path).resolve()]
+
+    pkg = package_or_path or ""
+    if not pkg:
+        from .config import resolve_tool_root
+        from .analyzer import resolve_trace_file
+        tr = resolve_tool_root(tool_root)
+        base = Path(log_dir) if log_dir else tr
+        # 遍历寻找最新日志
+        candidates = sorted(
+            [d for d in base.rglob("*.log*") if d.is_file() and not d.name.endswith(".lz4")],
+            key=lambda x: x.stat().st_mtime, reverse=True,
+        )
+        if candidates:
+            return [candidates[0]]
+        raise FileNotFoundError("未找到 trace 日志文件")
+
+    from .analyzer import resolve_trace_file
+    return resolve_trace_file(pkg, log_dir)
+
+
+# ── summarize ──────────────────────────────────────────────────
+
+@app.command()
+def summarize(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+):
+    """智能摘要 — 识别 XOR 循环、内存拷贝等算法模式。"""
+    try:
+        from .analyzer import summarize
+        paths = _resolve_path(input, tool_root, log_dir)
+        result = summarize(paths=paths)
+        print_json(result)
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── stack ──────────────────────────────────────────────────────
+
+@app.command()
+def stack(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    max_depth: int = typer.Option(20, "--max-depth"),
+    no_collapse: bool = typer.Option(False, "--no-collapse", help="不折叠重复调用"),
+):
+    """调用栈可视化 — 重建函数调用树。"""
+    try:
+        from .analyzer import build_stack, format_stack_tree
+        paths = _resolve_path(input, tool_root, log_dir)
+        calls = build_stack(paths=paths, max_depth=max_depth)
+        if not calls:
+            print("未发现函数调用记录")
+            return
+        print(format_stack_tree(calls, collapse_repeats=not no_collapse))
+        print(f"\n总调用数: {len(calls)}")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── grep ───────────────────────────────────────────────────────
+
+@app.command()
+def grep(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    pc_range: Optional[str] = typer.Option(None, "--pc-range", help="PC 范围 0xstart-0xend"),
+    opcode: Optional[str] = typer.Option(None, "--opcode", help="指令类型过滤，如 str, ldr, eor"),
+    module: Optional[str] = typer.Option(None, "--module", help="模块名过滤"),
+    reg: Optional[str] = typer.Option(None, "--reg", help="寄存器条件，如 x0=0x1234"),
+    max_results: int = typer.Option(50, "--max", help="最大结果数"),
+):
+    """结构化查询 — 按条件过滤 trace 指令。"""
+    try:
+        from .analyzer import grep as grep_func
+        paths = _resolve_path(input, tool_root, log_dir)
+
+        pc_range_tuple = None
+        if pc_range:
+            parts = pc_range.split("-")
+            if len(parts) == 2:
+                pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
+
+        reg_filter = None
+        if reg:
+            if "=" in reg:
+                r, v = reg.split("=", 1)
+                reg_filter = {r: int(v, 16) if v.startswith("0x") else int(v)}
+
+        results = grep_func(paths=paths, pc_range=pc_range_tuple, opcode=opcode,
+                           module=module, reg_filter=reg_filter, max_results=max_results)
+        if not results:
+            print("未匹配到结果")
+            return
+        for r in results:
+            print(f"  L{r['line_no']:>6} [{r['module']}] {r['address']}!{r['offset']} {r['insn']}")
+        print(f"\n匹配 {len(results)} 行")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── slice ──────────────────────────────────────────────────────
+
+@app.command()
+def slice(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    output: str = typer.Option("slice_output.log", "--output", help="输出文件路径"),
+    pc_range: Optional[str] = typer.Option(None, "--pc-range", help="PC 范围 0xstart-0xend"),
+    line_start: int = typer.Option(0, "--line-start", help="起始行号"),
+    line_end: int = typer.Option(0, "--line-end", help="结束行号"),
+    max_lines: int = typer.Option(0, "--max", help="最大输出行数"),
+):
+    """切片导出 — 裁剪 trace 到指定范围。"""
+    try:
+        from .analyzer import slice_trace
+        paths = _resolve_path(input, None, None)
+        if not paths:
+            raise FileNotFoundError("未找到 trace 文件")
+
+        pc_range_tuple = None
+        if pc_range:
+            parts = pc_range.split("-")
+            if len(parts) == 2:
+                pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
+
+        line_range = None
+        if line_start > 0 and line_end > 0:
+            line_range = (line_start, line_end)
+
+        result = slice_trace(paths[0], output, pc_range=pc_range_tuple,
+                            line_range=line_range, max_lines=max_lines)
+        print_json(result)
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── stats ──────────────────────────────────────────────────────
+
+@app.command()
+def stats(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+):
+    """API 调用统计 — 统计函数调用次数和指令分布。"""
+    try:
+        from .analyzer import stats as stats_func
+        paths = _resolve_path(input, tool_root, log_dir)
+        result = stats_func(paths=paths)
+        print(f"指令总数: {result['total_instructions']:,}")
+        print(f"函数调用: {result['total_calls']:,}")
+        if result.get("calls"):
+            print(f"\n调用分布 (Top {min(10, len(result['calls']))}):")
+            for c in result["calls"][:10]:
+                bar = "█" * min(c["count"], 50)
+                print(f"  {c['name']:<40} {c['count']:>6} {bar}")
+        if result.get("top_opcodes"):
+            print(f"\n指令分布 (Top 10):")
+            for o in result["top_opcodes"][:10]:
+                print(f"  {o['opcode']:<20} {o['count']:>6}")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── regdiff ────────────────────────────────────────────────────
+
+@app.command()
+def regdiff(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    regs: Optional[str] = typer.Option(None, "--regs", help="关注的寄存器，逗号分隔"),
+):
+    """寄存器变化热力图 — 统计每个寄存器的变化情况。"""
+    try:
+        from .analyzer import regdiff as regdiff_func
+        paths = _resolve_path(input, tool_root, log_dir)
+        target_regs = [r.strip() for r in regs.split(",") if r.strip()] if regs else None
+        results = regdiff_func(paths=paths, target_regs=target_regs)
+        if not results:
+            print("未捕获到寄存器变化")
+            return
+        print(f"{'寄存器':<10} {'变化次数':<10} {'首次值':<20} {'末次值':<20} {'最小值':<20} {'最大值':<20}")
+        print("-" * 100)
+        for r in results[:20]:
+            print(f"{r['register']:<10} {r['changes']:<10} {r['first']:<20} {r['last']:<20} {r['min']:<20} {r['max']:<20}")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── mempat ─────────────────────────────────────────────────────
+
+@app.command()
+def mempat(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+):
+    """内存访问模式检测 — 识别连续内存拷贝 / 置零等。"""
+    try:
+        from .analyzer import mempat as mempat_func
+        paths = _resolve_path(input, tool_root, log_dir)
+        results = mempat_func(paths=paths)
+        if not results:
+            print("未发现连续内存访问模式")
+            return
+        for r in results:
+            print(f"  {r['type']:<20} L{r['start_line']:>6}-L{r['end_line']:<6} stride={r['stride']} count={r['count']}")
+        print(f"\n共 {len(results)} 个模式")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── branch ─────────────────────────────────────────────────────
+
+@app.command()
+def branch(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    threshold: float = typer.Option(0.0, "--min-rate", help="最低跳转率过滤 0-100"),
+):
+    """分支命中率分析 — 统计条件跳转的跳转/不跳转次数。"""
+    try:
+        from .analyzer import branch_analysis
+        paths = _resolve_path(input, tool_root, log_dir)
+        results = branch_analysis(paths=paths)
+        if not results:
+            print("未发现条件分支指令")
+            return
+        # 过滤
+        if threshold > 0:
+            results = [r for r in results if r["taken_ratio"] >= threshold]
+        print(f"{'模块':<35} {'偏移':<12} {'指令':<25} {'跳转':<8} {'不跳':<8} {'跳转率':<8}")
+        print("-" * 100)
+        for r in results[:30]:
+            print(f"{r['module']:<35} {r['offset']:<12} {r['insn']:<25} {r['taken']:<8} {r['not_taken']:<8} {r['taken_ratio']:<7}%")
+        print(f"\n共 {len(results)} 个分支")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
 # ── mcp ─────────────────────────────────────────────────────────
 
 @app.command()
