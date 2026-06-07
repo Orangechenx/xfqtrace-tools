@@ -1,0 +1,2 @@
+recursive-include xfqtrace/_vendor *.js *.md
+prune xfqtrace/_vendor/*/algo-reverse

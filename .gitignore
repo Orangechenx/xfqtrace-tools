@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# venv
+.venv*
+.venv-frida162/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# xfqtrace - 本地 SO（用户自己添加，不在 whl 中）
+xfqtrace/_vendor/libxfqtrace.so
+xfqtrace/_vendor/lz4.exe
+xfqtrace/_vendor/ru.moneyman/algo-reverse/libsdk_bc_lib.so
+
+# trace 日志
+xfqtrace/_vendor/*/logs/
+
+# 临时 agent 文件
+xfqtrace-*.js
