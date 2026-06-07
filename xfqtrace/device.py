@@ -107,7 +107,7 @@ class FridaDevice:
         if not so_local.exists():
             raise FileNotFoundError(
                 f"引擎 SO 不存在: {so_local}\n"
-                f"请将 libxfqtrace.so 放入 {cfg.tool_asset(self.tool_root, BIN_DIR)}/ 目录，\n"
+                f"请将 libxfqtrace.so 放入 {cfg.tool_asset(self.tool_root, cfg.BIN_DIR)}/ 目录，\n"
                 f"或用 --so-path 指定路径"
             )
 

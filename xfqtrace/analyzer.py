@@ -10,11 +10,10 @@ trace 日志行格式:
 """
 
 import re
-import struct
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Generator, Iterable
+from typing import Any, Generator
 
 
 # ── 行解析 ──────────────────────────────────────────────────────
