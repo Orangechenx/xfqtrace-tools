@@ -97,15 +97,18 @@ def engine_so_path(tool_root: Path, explicit: str | Path | None = None) -> Path:
 
 
 def lz4_exe_path(tool_root: Path) -> Path:
-    """LZ4 可执行路径，优先 vendor/，回退工具目录 bin/。"""
-    candidates = [
-        vendor_dir() / LZ4_EXE,
-        tool_asset(tool_root, BIN_DIR, LZ4_EXE),
-    ]
-    for c in candidates:
-        if c.exists():
-            return c.resolve()
-    return candidates[0]
+    """LZ4 可执行路径，优先系统 lz4，Windows 回退 vendor/lz4.exe。"""
+    # 系统 lz4（macOS/Linux）
+    import shutil
+    system_lz4 = shutil.which("lz4")
+    if system_lz4:
+        return Path(system_lz4)
+
+    # Windows: 用包内自带的 lz4.exe
+    vendor_lz4 = vendor_dir() / LZ4_EXE
+    if vendor_lz4.exists():
+        return vendor_lz4
+    return tool_asset(tool_root, BIN_DIR, LZ4_EXE)
 
 
 def default_hook_script(tool_root: Path) -> Path:

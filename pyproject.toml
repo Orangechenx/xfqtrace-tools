@@ -41,7 +41,7 @@ xfq = "xfqtrace.cli:app"
 packages = {find = {include = ["xfqtrace", "xfqtrace.*"]}}
 
 [tool.setuptools.package-data]
-xfqtrace = ["_vendor/**/*.js", "_vendor/**/*.md"]
+xfqtrace = ["_vendor/**/*.js", "_vendor/**/*.md", "_vendor/*.exe"]
 
 [tool.ruff]
 line-length = 120

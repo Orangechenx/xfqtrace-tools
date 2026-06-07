@@ -22,7 +22,6 @@ Thumbs.db
 
 # xfqtrace - 本地 SO（用户自己添加，不在 whl 中）
 xfqtrace/_vendor/libxfqtrace.so
-xfqtrace/_vendor/lz4.exe
 xfqtrace/_vendor/ru.moneyman/algo-reverse/libsdk_bc_lib.so
 
 # trace 日志

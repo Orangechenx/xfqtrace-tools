@@ -393,13 +393,12 @@ class FridaDevice:
     def _decompress_lz4(self, lz4_path: Path, out_dir: Path) -> Path | None:
         """解压 .lz4 文件，返回解压后路径或 None。"""
         out_path = out_dir / lz4_path.name[:-4]
-        # 优先用系统 lz4
-        lz4_bin = self._find_lz4()
-        if not lz4_bin:
+        lz4_bin = cfg.lz4_exe_path(self.tool_root)
+        if not lz4_bin.exists():
             print(f"  [~] lz4 不可用，跳过解压: {lz4_path.name}")
             return None
         r = subprocess.run(
-            [lz4_bin, "-d", "-f", str(lz4_path), str(out_path)],
+            [str(lz4_bin), "-d", "-f", str(lz4_path), str(out_path)],
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode != 0 and (not out_path.exists() or out_path.stat().st_size == 0):
@@ -413,18 +412,6 @@ class FridaDevice:
         if r.returncode == 0:
             lz4_path.unlink(missing_ok=True)
         return out_path
-
-    @staticmethod
-    def _find_lz4() -> str | None:
-        """查找 lz4 可执行文件。"""
-        import platform as _platform
-        is_win = _platform.system() == "Windows"
-        cmd = "where" if is_win else "which"
-        name = "lz4.exe" if is_win else "lz4"
-        r = subprocess.run([cmd, name], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-        return None
 
     # ── 诊断 ─────────────────────────────────────────────────────
 
@@ -452,7 +439,7 @@ class FridaDevice:
 
         so_ok = cfg.engine_so_path(self.tool_root).exists()
 
-        lz4_ok = self._find_lz4() is not None
+        lz4_ok = cfg.lz4_exe_path(self.tool_root).exists()
 
         return {
             "device": {"serial": serial, "connected": adb_ok},
