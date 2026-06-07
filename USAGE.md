@@ -1,6 +1,6 @@
 # xfQTrace 使用文档
 
-真机 Android NDK 指令级 trace 工具 — 基于 QBDI + Frida，提供 CLI + MCP Server。
+基于 [LunFengChen (xfq)](https://github.com/LunFengChen) 的 [xfQTrace](https://github.com/xfq/frida-qbdi-trace) 真机 Android NDK 指令级 trace 工具封装，提供 CLI + MCP Server。
 
 ## 目录
 
@@ -32,21 +32,18 @@ pip install git+https://github.com/Orangechenx/xfqtrace-tools.git
 
 安装后 `xfq` 和 `xfqtrace` 两个命令自动可用。
 
+> **注意：** `libxfqtrace.so` 是 xfQTrace 的 native 引擎，不随 pip 包分发。需自行下载后通过 `xfq add /path/to/libxfqtrace.so` 安装。
+
 ### 确认安装
 
 ```bash
-xfqtrace doctor
+xfq doctor
 ```
 
-输出示例：
+### 查看内置案例
 
-```json
-{
-  "device": { "serial": "11041FDD4003U6", "connected": true },
-  "frida": { "cli_ok": true, "cli_version": "16.2.1", "server_running": true },
-  "assets": { "tool_root_exists": true, "engine_so": true },
-  "tools": { "lz4": true }
-}
+```bash
+xfq info
 ```
 
 ### 前置依赖
@@ -66,16 +63,19 @@ xfqtrace doctor
 
 ```bash
 # 1. 环境检查
-xfqtrace doctor
+xfq doctor
 
 # 2. 查看内置案例
-xfqtrace info
+xfq info
 
-# 3. 生成 hook 配置
-xfqtrace gen-config -p cn.damai --so libsgmainso-6.7.250504.so --offset 0x57bb8 --overwrite
+# 3. 安装引擎 SO（需提前下载 libxfqtrace.so）
+xfq add /path/to/libxfqtrace.so
 
-# 4. 执行 trace
-xfqtrace run -p cn.damai --timeout 30 --execute
+# 4. 生成 hook 配置
+xfq gen-config -p cn.damai --so libsgmainso-6.7.250504.so --offset 0x57bb8 --overwrite
+
+# 5. 执行 trace
+xfq run -p cn.damai --timeout 30 --execute
 ```
 
 ---
@@ -87,8 +87,8 @@ xfqtrace run -p cn.damai --timeout 30 --execute
 检查设备连接、frida CLI、frida-server、资产完整性。
 
 ```bash
-xfqtrace doctor
-xfqtrace doctor --serial 11041FDD4003U6     # 指定设备
+xfq doctor
+xfq doctor --serial 11041FDD4003U6     # 指定设备
 ```
 
 ---
@@ -98,7 +98,7 @@ xfqtrace doctor --serial 11041FDD4003U6     # 指定设备
 查看内置工具目录、引擎 SO、案例包列表。
 
 ```bash
-xfqtrace info
+xfq info
 ```
 
 ---
@@ -110,7 +110,7 @@ xfqtrace info
 **必填参数：**
 
 ```bash
-xfqtrace gen-config \
+xfq gen-config \
   -p com.example.app \       # 目标包名
   --so libnative.so \        # 目标 SO 名
   --offset 0x1234            # 函数 RVA（支持 0x 十六进制）
@@ -119,7 +119,7 @@ xfqtrace gen-config \
 **可选参数（hook 行为）：**
 
 ```bash
-xfqtrace gen-config \
+xfq gen-config \
   -p cn.damai \
   --so libsgmainso-6.7.250504.so \
   --offset 0x5b198 \
@@ -156,35 +156,35 @@ xfqtrace gen-config \
 **默认 dry-run（只输出计划，不实际执行）：**
 
 ```bash
-xfqtrace run -p cn.damai
+xfq run -p cn.damai
 ```
 
 **真实执行：**
 
 ```bash
-xfqtrace run -p cn.damai --execute
+xfq run -p cn.damai --execute
 ```
 
 **常用选项：**
 
 ```bash
 # attach 模式（APP 已在运行）
-xfqtrace run -p com.douban.frodo --attach --execute
+xfq run -p com.douban.frodo --attach --execute
 
 # 指定超时（默认 120s）
-xfqtrace run -p cn.damai --timeout 30 --execute
+xfq run -p cn.damai --timeout 30 --execute
 
 # 带 bypass 反检测
-xfqtrace run -p com.starbucks.cn --bypass bangbang --execute
+xfq run -p com.starbucks.cn --bypass bangbang --execute
 
 # 多个 bypass（逗号分隔）
-xfqtrace run -p com.example.app --bypass anti_debug,msa --execute
+xfq run -p com.example.app --bypass anti_debug,msa --execute
 
 # 自定义 hook 脚本
-xfqtrace run -p cn.damai --script /path/to/custom_hook.js --execute
+xfq run -p cn.damai --script /path/to/custom_hook.js --execute
 
 # 指定设备
-xfqtrace run -p cn.damai --serial 11041FDD4003U6 --execute
+xfq run -p cn.damai --serial 11041FDD4003U6 --execute
 ```
 
 **执行过程输出解读：**
@@ -212,8 +212,8 @@ xfqtrace run -p cn.damai --serial 11041FDD4003U6 --execute
 当 run 超时或中断后，单独拉取设备上的 trace 文件：
 
 ```bash
-xfqtrace pull-only -p cn.damai
-xfqtrace pull-only -p cn.damai --execute   # 真实执行拉取
+xfq pull-only -p cn.damai
+xfq pull-only -p cn.damai --execute   # 真实执行拉取
 ```
 
 ---
@@ -223,20 +223,20 @@ xfqtrace pull-only -p cn.damai --execute   # 真实执行拉取
 **列出日志：**
 
 ```bash
-xfqtrace list-logs -p cn.damai
+xfq list-logs -p cn.damai
 ```
 
 **预览日志内容：**
 
 ```bash
 # 预览最新日志（前 8KB）
-xfqtrace preview-log -p cn.damai
+xfq preview-log -p cn.damai
 
 # 预览指定 run
-xfqtrace preview-log -p cn.damai --run-id 1
+xfq preview-log -p cn.damai --run-id 1
 
 # 预览前 500 字节
-xfqtrace preview-log -p cn.damai --max-bytes 500
+xfq preview-log -p cn.damai --max-bytes 500
 ```
 
 ---
@@ -245,13 +245,13 @@ xfqtrace preview-log -p cn.damai --max-bytes 500
 
 ```bash
 # 生成 logcat 命令
-xfqtrace logcat
+xfq logcat
 
 # 带清理缓冲区
-xfqtrace logcat --clear
+xfq logcat --clear
 
 # 指定设备
-xfqtrace logcat --serial 11041FDD4003U6
+xfq logcat --serial 11041FDD4003U6
 ```
 
 ---
@@ -259,7 +259,7 @@ xfqtrace logcat --serial 11041FDD4003U6
 ### 3.8 mcp — MCP Server
 
 ```bash
-xfqtrace mcp
+xfq mcp
 ```
 
 ---
@@ -348,13 +348,13 @@ Module.enumerateExports('libtarget.so')
 "
 
 # 4. 生成配置
-xfqtrace gen-config -p com.target.app --so libtarget.so --offset 0x5678 --overwrite
+xfq gen-config -p com.target.app --so libtarget.so --offset 0x5678 --overwrite
 
 # 5. 执行 trace
-xfqtrace run -p com.target.app --timeout 60 --execute
+xfq run -p com.target.app --timeout 60 --execute
 
 # 6. 查看结果
-xfqtrace preview-log -p com.target.app
+xfq preview-log -p com.target.app
 ```
 
 ### 5.2 场景二：大麦 doCommandNative（按 cmd 过滤）
@@ -365,7 +365,7 @@ frida -U -n cn.damai -q \
   -e "Process.findModuleByName('libsgmainso-*').then(m => console.log(m.name));"
 
 # 生成带 arg_filter 的配置
-xfqtrace gen-config \
+xfq gen-config \
   -p cn.damai \
   --so "libsgmainso-6.7.250504.so" \
   --offset 0x5b198 \
@@ -377,7 +377,7 @@ xfqtrace gen-config \
   --overwrite
 
 # 执行
-xfqtrace run -p cn.damai --timeout 60 --execute
+xfq run -p cn.damai --timeout 60 --execute
 ```
 
 ### 5.3 场景三：attach 已运行进程
@@ -387,17 +387,17 @@ xfqtrace run -p cn.damai --timeout 60 --execute
 adb shell "monkey -p com.douban.frodo -c android.intent.category.LAUNCHER 1"
 
 # attach 模式执行
-xfqtrace run -p com.douban.frodo --attach --execute
+xfq run -p com.douban.frodo --attach --execute
 ```
 
 ### 5.4 场景四：带 bypass 反检测
 
 ```bash
 # 星巴克（梆梆加固）
-xfqtrace run -p com.starbucks.cn --bypass bangbang --execute
+xfq run -p com.starbucks.cn --bypass bangbang --execute
 
 # 多 bypass 组合
-xfqtrace run -p com.example.app --bypass anti_debug,msa --execute
+xfq run -p com.example.app --bypass anti_debug,msa --execute
 ```
 
 内置 bypass 脚本：
@@ -412,13 +412,13 @@ xfqtrace run -p com.example.app --bypass anti_debug,msa --execute
 
 ```bash
 # 查看所有 run
-xfqtrace list-logs -p cn.damai
+xfq list-logs -p cn.damai
 
 # 预览最新日志
-xfqtrace preview-log -p cn.damai --max-bytes 2000
+xfq preview-log -p cn.damai --max-bytes 2000
 
 # 预览指定 run
-xfqtrace preview-log -p cn.damai --run-id 1
+xfq preview-log -p cn.damai --run-id 1
 ```
 
 trace 日志格式示例：
@@ -442,7 +442,7 @@ trace 日志格式示例：
 {
   "mcpServers": {
     "xfqtrace": {
-      "command": "xfqtrace",
+      "command": "xfq",
       "args": ["mcp"]
     }
   }
@@ -453,7 +453,7 @@ trace 日志格式示例：
 
 ```
 Name: xfqtrace
-Command: xfqtrace
+Command: xfq
 Args: mcp
 ```
 
@@ -461,7 +461,7 @@ Args: mcp
 
 ```bash
 # 启动后，用以下 JSON Lines 格式交互
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfqtrace mcp
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 ```
 
 ### MCP 工具列表
@@ -482,7 +482,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfqtrace mcp
 
 ### Q: 找不到进程 / attach 失败
 
-`xfqtrace` 会自动通过 `adb shell ps` 解析 PID，然后使用 `frida -p PID` 附加。如果失败，可以手动确认进程存在：
+`xfq` 会自动通过 `adb shell ps` 解析 PID，然后使用 `frida -p PID` 附加。如果失败，可以手动确认进程存在：
 
 ```bash
 adb shell "ps | grep com.example.app"
@@ -498,18 +498,18 @@ adb shell "ps | grep com.example.app"
 
 ```bash
 # 重新生成配置，开启 sync_flush 调试
-xfqtrace gen-config -p com.example.app --so libtarget.so --offset 0x1234 --sync-flush --overwrite
+xfq gen-config -p com.example.app --so libtarget.so --offset 0x1234 --sync-flush --overwrite
 
 # 减少 trace 范围
-xfqtrace gen-config -p com.example.app --so libtarget.so --offset 0x1234 --max-traces 1 --overwrite
+xfq gen-config -p com.example.app --so libtarget.so --offset 0x1234 --max-traces 1 --overwrite
 
 # 换 inline hook 后端
-xfqtrace gen-config -p com.example.app --so libtarget.so --offset 0x1234 --inline-hook-backend 1 --overwrite
+xfq gen-config -p com.example.app --so libtarget.so --offset 0x1234 --inline-hook-backend 1 --overwrite
 ```
 
 ### Q: frida 版本不匹配
 
-`xfqtrace` 不依赖 Python frida 包，全程调系统 `frida` 二进制。只要 `frida --version` 和设备的 `frida-server --version` 一致即可。
+`xfq` 不依赖 Python frida 包，全程调系统 `frida` 二进制。只要 `frida --version` 和设备的 `frida-server --version` 一致即可。
 
 ### Q: 如何找到函数偏移
 
