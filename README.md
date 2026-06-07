@@ -1,6 +1,6 @@
 # xfQTrace — 真机 Android NDK 指令级 trace
 
-基于 [xfQTrace](https://github.com/xfq/frida-qbdi-trace)（QBDI + Frida）的真机 trace 工具封装，提供统一的 **CLI** + **MCP Server**。
+基于 [LunFengChen (xfq)](https://github.com/LunFengChen) 的 [xfQTrace](https://github.com/xfq/frida-qbdi-trace)（QBDI + Frida）的真机 trace 工具封装，提供统一的 **CLI** + **MCP Server**。
 
 ## 快速开始
 
@@ -8,37 +8,37 @@
 pip install git+https://github.com/Orangechenx/xfqtrace-tools.git
 
 # 检查环境
-xfqtrace doctor
+xfq doctor
 
 # 查看资产
-xfqtrace info
+xfq info
 
 # 获取引擎 SO（需提前下载 libxfqtrace.so）
-xfqtrace add /path/to/libxfqtrace.so
+xfq add /path/to/libxfqtrace.so
 
 # 生成 hook 配置
-xfqtrace gen-config -p com.example.app --so libnative.so --offset 0x1234
+xfq gen-config -p com.example.app --so libnative.so --offset 0x1234
 
 # dry-run 查看计划
-xfqtrace run -p com.example.app
+xfq run -p com.example.app
 
 # 执行 trace
-xfqtrace run -p com.example.app --execute
+xfq run -p com.example.app --execute
 
 # 启动 MCP Server
-xfqtrace mcp
+xfq mcp
 ```
 
-> **注意：** `libxfqtrace.so` 是 xfQTrace 的 native 引擎，不随 pip 包分发。你需要自行获取后运行 `xfqtrace add /path/to/libxfqtrace.so` 完成安装。
+> **注意：** `libxfqtrace.so` 是 xfQTrace 的 native 引擎，不随 pip 包分发。你需要自行获取后运行 `xfq add /path/to/libxfqtrace.so` 完成安装。
 
 ## 架构
 
 ```
 ┌─────────────────────────────────────────────┐
-│  xfqtrace CLI                                │
-│  xfqtrace doctor | info | gen-config | run   │
-│  xfqtrace pull-only | list-logs | preview    │
-│  xfqtrace logcat | mcp                       │
+│  xfq CLI                                     │
+│  xfq doctor | info | gen-config | run        │
+│  xfq pull-only | list-logs | preview         │
+│  xfq logcat | mcp                            │
 ├─────────────────────────────────────────────┤
 │  xfqtrace.core     核心业务逻辑              │
 │  xfqtrace.device   adb + frida 设备管理      │
@@ -82,7 +82,7 @@ xfqtrace mcp
 {
   "mcpServers": {
     "xfqtrace": {
-      "command": "xfqtrace",
+      "command": "xfq",
       "args": ["mcp"]
     }
   }
