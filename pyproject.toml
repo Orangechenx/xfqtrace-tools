@@ -1,12 +1,12 @@
 [project]
-name = "xfqtrace-cli"
+name = "xfqtrace-tools"
 version = "0.3.0"
 description = "真机 Android NDK 指令级 trace 工具 — CLI + MCP Server"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    {name = "xfq", email = "i@xfq.fun"},
+    {name = "xfq (LunFengChen)", email = "i@xfq.fun"},
 ]
 keywords = [
     "android", "reverse-engineering", "trace", "frida", "qbdi", "mcp",
@@ -29,9 +29,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Orangechenx/xfqtrace-cli"
-Repository = "https://github.com/Orangechenx/xfqtrace-cli"
-Documentation = "https://github.com/Orangechenx/xfqtrace-cli#readme"
+Homepage = "https://github.com/Orangechenx/xfqtrace-tools"
+Repository = "https://github.com/Orangechenx/xfqtrace-tools"
+Documentation = "https://github.com/Orangechenx/xfqtrace-tools#readme"
 
 [project.scripts]
 xfqtrace = "xfqtrace.cli:app"

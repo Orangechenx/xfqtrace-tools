@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-pip install git+https://github.com/Orangechenx/xfqtrace-cli.git
+pip install git+https://github.com/Orangechenx/xfqtrace-tools.git
 
 # 检查环境
 xfqtrace doctor
@@ -85,5 +85,5 @@ xfqtrace mcp
 
 ## 致谢
 
-- [xfQTrace](https://github.com/xfq/frida-qbdi-trace) — 基于 QBDI 的 Android native trace 引擎
+- [LunFengChen (xfq)](https://github.com/LunFengChen) — [xfQTrace](https://github.com/xfq/frida-qbdi-trace) 基于 QBDI 的 Android native trace 引擎
 - [Frida](https://frida.re) — 动态插桩框架

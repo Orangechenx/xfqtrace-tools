@@ -27,7 +27,7 @@
 ### 从 GitHub 安装（推荐）
 
 ```bash
-pip install git+https://github.com/Orangechenx/xfqtrace-cli.git
+pip install git+https://github.com/Orangechenx/xfqtrace-tools.git
 ```
 
 安装后 `xfq` 和 `xfqtrace` 两个命令自动可用。
