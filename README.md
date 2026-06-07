@@ -13,6 +13,9 @@ xfqtrace doctor
 # 查看资产
 xfqtrace info
 
+# 获取引擎 SO（需提前下载 libxfqtrace.so）
+xfqtrace add /path/to/libxfqtrace.so
+
 # 生成 hook 配置
 xfqtrace gen-config -p com.example.app --so libnative.so --offset 0x1234
 
@@ -25,6 +28,8 @@ xfqtrace run -p com.example.app --execute
 # 启动 MCP Server
 xfqtrace mcp
 ```
+
+> **注意：** `libxfqtrace.so` 是 xfQTrace 的 native 引擎，不随 pip 包分发。你需要自行获取后运行 `xfqtrace add /path/to/libxfqtrace.so` 完成安装。
 
 ## 架构
 
@@ -40,7 +45,7 @@ xfqtrace mcp
 │  xfqtrace.mcp_server  MCP Server (双格式)     │
 ├─────────────────────────────────────────────┤
 │  xfqtrace/_vendor/  内置资产                 │
-│    ├── libxfqtrace.so     (QBDI 引擎)        │
+│    ├── libxfqtrace.so  ← 需 add 安装 (引擎)  │
 │    ├── 半自动化trace.js   (Frida 模板)       │
 │    ├── scripts/           (bypass 脚本)      │
 │    └── <package>/         (案例配置)          │
@@ -55,6 +60,7 @@ xfqtrace mcp
 |---|---|
 | `doctor` | 检查 adb/frida/frida-server/资产 |
 | `info` | 查看工具资产和案例列表 |
+| `add` | 将 libxfqtrace.so 复制到包内 _vendor/ 目录 |
 | `gen-config` | 生成 Frida hook 脚本 |
 | `run` | 执行 trace（默认 dry-run） |
 | `pull-only` | 仅拉取设备 trace 日志 |
