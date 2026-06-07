@@ -838,6 +838,18 @@ def taint_analysis(
         paths = resolve_trace_file(package, log_dir)
 
     lines = list(iter_lines(paths=paths, text=text))
+
+    # 参数校验（在早期返回之前检查）
+    if taint_mem_range:
+        start, end = taint_mem_range
+        if end < start:
+            raise ValueError(f"内存范围起始地址不能大于结束地址 ({hex(start)} > {hex(end)})")
+        if end - start > 1_000_000:
+            raise ValueError(
+                f"内存范围过大 ({hex(start)}-{hex(end)}, {(end-start)/1024/1024:.1f} MB)。"
+                f"请将范围缩小到 1MB 以内。"
+            )
+
     if not lines:
         return {"total_instructions": 0, "ret_tainted": False, "ret_tags": [], "propagation_count": 0,
                 "propagation": [], "result_register_taint": {}, "result_memory_taint": {}}
