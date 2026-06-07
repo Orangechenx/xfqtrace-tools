@@ -181,10 +181,27 @@ def detect_xor_loop(lines: list[TraceLine]) -> list[dict]:
         # 看后面是否有条件跳转回前面
         for j in range(i + 1, min(i + 10, len(lines))):
             insn = lines[j].insn
-            if re.match(r"b\.(eq|ne|gt|lt|cs|cc)\s", insn):
-                # 尝试解析跳转目标
-                m = re.search(r"0x[0-9a-f]+", insn)
-                if m and int(m.group(0), 16) <= lines[i].address:
+            op_j = insn.split()[0] if insn else ""
+            # 条件跳转（b.cond, cbz, cbnz, tbnz, tbz）
+            if op_j in COND_BRANCHES or re.match(r"b\.(eq|ne|gt|lt|cs|cc|mi|pl|vs|vc|hi|ls|ge|le|al)\b", insn):
+                # 判断是否为向后跳转（循环）：负偏移或回跳
+                is_backward = False
+                if "#-" in insn:
+                    is_backward = True  # 负偏移 → 回跳
+                else:
+                    # 取最后一个 0x 值作为跳转偏移
+                    hex_vals = re.findall(r"[-]?0x[0-9a-f]+", insn)
+                    if hex_vals:
+                        # 尝试从偏移和当前地址判断方向
+                        try:
+                            offset = int(hex_vals[-1], 16)
+                            target_addr = lines[j].address + offset  # 近似：正偏移 = forward
+                            if target_addr <= lines[i].address:
+                                is_backward = True
+                        except (ValueError, IndexError):
+                            pass
+
+                if is_backward:
                     results.append({
                         "type": "xor_loop",
                         "start_line": lines[i].line_no,
@@ -388,16 +405,15 @@ def grep(paths: list[str | Path] | str | Path | None = None,
         if module and module not in tl.module:
             continue
 
-        # 寄存器值过滤
+        # 寄存器值过滤：寄存器在执行前或执行后等于目标值即匹配
         if reg_filter:
-            matched = True
+            matched = False
             for reg, val in reg_filter.items():
-                if reg in tl.regs_before and tl.regs_before[reg] != val:
-                    matched = False
-                    break
-                if reg in tl.regs_after and tl.regs_after[reg] != val:
-                    matched = False
-                    break
+                if reg in tl.regs_before and tl.regs_before[reg] == val:
+                    matched = True
+                if reg in tl.regs_after and tl.regs_after[reg] == val:
+                    matched = True
+                # 只有寄存器在两个集合中都不存在时才跳过
             if not matched:
                 continue
 
@@ -689,12 +705,13 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
         if op not in COND_BRANCHES:
             continue
 
-        # 提取跳转目标
-        m = re.search(r"(?:0x[0-9a-f]+)", insn)
-        target_str = m.group(0) if m else ""
+        # 提取跳转目标（可能是绝对地址或偏移）
+        m_target = re.search(r"(0x[0-9a-f]+)", insn)
+        target_str = m_target.group(0) if m_target else ""
 
         # 看下一条指令地址
         next_addr = lines[i + 1].address if i + 1 < len(lines) else 0
+        fallthrough_addr = tl.address + 4  # AArch64 指令固定 4 字节
 
         # 是否跳转
         key = f"{tl.module}:{hex(tl.offset)} {insn}"
@@ -708,10 +725,9 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
                 "not_taken": 0,
             }
 
-        if target_str and next_addr:
-            target_addr = int(target_str, 16)
-            if target_addr == next_addr:
-                # 条件为假，没跳转
+        if next_addr:
+            # 下一条指令与 fallthrough 地址相同 → 未跳转
+            if next_addr == fallthrough_addr:
                 branches[key]["not_taken"] += 1
             else:
                 branches[key]["taken"] += 1
