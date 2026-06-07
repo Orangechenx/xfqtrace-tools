@@ -121,14 +121,16 @@ def iter_lines(
 
     for p_str in (paths or []):
         p = Path(p_str)
-        if not p.exists():
+        if not p.exists() or not p.is_file():
             continue
         total = p.stat().st_size
         reported = 0
+        byte_pos = 0
         with p.open("r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f, 1):
+                byte_pos += len(line.encode("utf-8", errors="replace"))
                 if progress and total > 10_000_000:
-                    pct = int(f.tell() * 100 / total)
+                    pct = int(byte_pos * 100 / total)
                     if pct >= reported + 10:
                         reported = (pct // 10) * 10
                         print(f"  [{pct}%]", end=" ", flush=True)
@@ -769,9 +771,6 @@ ALU_OPS = {"add", "sub", "eor", "and", "orr", "bic", "orn",
 
 
 # 提取指令中的寄存器操作数
-OPERAND_RE = re.compile(r"(?:[xw](\d+)|sp)")
-
-
 def _extract_regs(insn: str) -> list[str]:
     """从指令中提取所有寄存器名。"""
     regs = []
@@ -1033,12 +1032,12 @@ def format_taint_result(result: dict, max_prop: int = 50) -> str:
     lines.append("")
 
     if result.get("propagation"):
-        lines.append("传播路径 (前 {} 条):".format(min(max_prop, len(result["propagation"]))))
+        display_count = min(max(0, max_prop), len(result["propagation"]))
+        lines.append(f"传播路径 (前 {display_count} 条):")
         lines.append("")
-        for p in result["propagation"][:max_prop]:
+        for p in result["propagation"][:max_prop if max_prop > 0 else 0]:
             if p["type"] == "reg":
-                arrow = "→" if p["target"] in reg_taint or p["target"].startswith("x") else "→"
-                lines.append(f"  L{p['line_no']:>6}  {arrow}  {p['target']:<6}  <- {', '.join(p['tags']):<30}  {p['insn']}")
+                lines.append(f"  L{p['line_no']:>6}  →  {p['target']:<6}  <- {', '.join(p['tags']):<30}  {p['insn']}")
             else:
                 lines.append(f"  L{p['line_no']:>6}  →  {p['target']:<22} <- {', '.join(p['tags']):<30}  {p['insn']}")
 

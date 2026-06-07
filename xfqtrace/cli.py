@@ -18,18 +18,24 @@ app = typer.Typer(
 
 # 全局共享的 core 实例（按需懒初始化）
 _core: XfqtraceCore | None = None
+_core_tool_root: str | None = None
+_core_serial: str | None = None
 
 
 def get_core(
     tool_root: str | None = None,
     serial: str | None = None,
 ) -> XfqtraceCore:
-    global _core
-    if _core is None:
+    global _core, _core_tool_root, _core_serial
+    need_new = _core is None
+    if not need_new and tool_root is not None and tool_root != _core_tool_root:
+        need_new = True
+    if not need_new and serial is not None and serial != _core_serial:
+        need_new = True
+    if need_new:
         _core = XfqtraceCore(tool_root=tool_root, serial=serial)
-    elif tool_root or serial:
-        # 如果显式传了参数则重新创建
-        _core = XfqtraceCore(tool_root=tool_root, serial=serial)
+        _core_tool_root = tool_root
+        _core_serial = serial
     return _core
 
 
@@ -231,7 +237,6 @@ def install():
     """将 xfq / xfqtrace 注册到 ~/.local/bin（创建软链接）。"""
     import os
     import stat
-    from pathlib import Path
 
     # 当前入口点路径
     entry = Path(sys.argv[0]).resolve()
@@ -327,7 +332,6 @@ PKG_OR_FILE_HELP = "包名或 trace 文件路径（不传则自动找最新日�
 
 def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: str | None) -> list[Path]:
     """统一解析 trace 文件路径。"""
-    from pathlib import Path
 
     if package_or_path and Path(package_or_path).exists():
         p = Path(package_or_path).resolve()
@@ -697,7 +701,7 @@ def taint(
             for r in regs:
                 # 允许 --taint x2=0x41 (=号后忽略) 也允许纯 --taint x2
                 bare = r.split("=", 1)[0] if "=" in r else r
-                if re.match(r"^[xw]\d+$", bare) or bare == "sp":
+                if re.match(r"^(x([0-2]?\d|30)|w([0-2]?\d|30))$", bare) or bare == "sp":
                     cleaned.append(bare)
                 else:
                     print(f"错误: 无效的寄存器名 '{bare}'，应为 x0~x30/w0~w30/sp", file=sys.stderr)
