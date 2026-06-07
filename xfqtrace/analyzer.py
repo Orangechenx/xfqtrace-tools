@@ -88,7 +88,7 @@ def parse_line(line: str, line_no: int = 0) -> TraceLine | None:
     return tl
 
 
-REG_RE = re.compile(r"(?P<reg>[xw]\d+|[a-z0-9]+)=(?P<val>0x[0-9a-f]+|\d+)")
+REG_RE = re.compile(r"(?P<reg>[xw]\d+|[a-z0-9]+)=(?P<val>0x[0-9a-fA-F]+|\d+)")
 
 def _parse_regs(text: str) -> dict[str, int]:
     """从 'x0=0x1234 x1=0x5678' 提取寄存器字典。"""
