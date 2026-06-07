@@ -709,3 +709,269 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
 
     results.sort(key=lambda x: x["total"], reverse=True)
     return results
+
+
+# ══════════════════════════════════════════════════════════════════
+# 9. taint — 污点分析
+# ══════════════════════════════════════════════════════════════════
+
+# str/stp 类内存写指令
+STORE_OPS = {"str", "stp", "strb", "strh", "stur", "sturb", "sturh"}
+# ldr/ldp 类内存读指令
+LOAD_OPS = {"ldr", "ldp", "ldrb", "ldrh", "ldur", "ldurb", "ldurh", "ldrsw"}
+# ALU 类（结果继承所有源操作数的污点）
+ALU_OPS = {"add", "sub", "eor", "and", "orr", "bic", "orn",
+           "lsl", "lsr", "asr", "mul", "udiv", "sdiv",
+           "csel", "csinc", "csinv", "csneg",
+           "mov", "mvn", "neg", "lslv", "lsrv", "asrv"}
+
+
+# 提取指令中的寄存器操作数
+OPERAND_RE = re.compile(r"(?:[xw](\d+)|sp)")
+
+
+def _extract_regs(insn: str) -> list[str]:
+    """从指令中提取所有寄存器名。"""
+    regs = []
+    parts = insn.replace(",", " ").replace(";", " ").split()
+    for p in parts:
+        p = p.strip()
+        if re.match(r"^[xw](\d+)$", p):
+            regs.append(p)
+        elif p == "sp":
+            regs.append("sp")
+    return regs
+
+
+def _get_mem_addr(insn: str, regs_before: dict[str, int]) -> int | None:
+    """从 str/ldr 指令的 [base, #offset] 形式计算绝对地址。"""
+    m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", insn)
+    if not m:
+        return None
+    base_reg = m.group(1)
+    base_val = regs_before.get(base_reg, 0)
+    off_str = m.group(2)
+    if off_str:
+        off_str = off_str.replace("#", "")
+        try:
+            offset = int(off_str, 16) if "0x" in off_str else int(off_str)
+        except ValueError:
+            offset = 0
+    else:
+        offset = 0
+    return base_val + offset
+
+
+# 寄存器别名映射（w0 → x0, w1 → x1 等）
+def _reg_canonical(name: str) -> str:
+    """统一寄存器名：w0 → x0, 其他不变。"""
+    if name.startswith("w") and name[1:].isdigit():
+        return f"x{name[1:]}"
+    return name
+
+
+def taint_analysis(
+    paths: list[str | Path] | str | Path | None = None,
+    text: str | None = None,
+    log_dir: str | Path | None = None,
+    package: str = "",
+    taint_regs: list[str] | None = None,
+    taint_mem_range: tuple[int, int] | None = None,
+    summary: bool = False,
+) -> dict:
+    """污点分析：标记输入，跟踪传播路径。
+
+    Args:
+        taint_regs: 初始标记的寄存器列表，如 ["x2"]
+        taint_mem_range: 初始标记的内存地址范围 (start, end)
+        summary: 只输出结论，不输出详细传播路径
+
+    Returns:
+        包含传播路径和结果的 dict
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [Path(paths)]
+
+    if not paths and package:
+        paths = resolve_trace_file(package, log_dir)
+
+    lines = list(iter_lines(paths=paths, text=text))
+    if not lines:
+        return {"total_instructions": 0, "propagation": [], "result_register_taint": {}, "result_memory_taint": {}}
+
+    # 污点状态
+    reg_taint: dict[str, set[str]] = {}  # 寄存器 → {污点标签}
+    mem_taint: dict[int, set[str]] = {}  # 绝对地址 → {污点标签}
+
+    # 初始化污点标记
+    if taint_regs:
+        for r in taint_regs:
+            reg_taint.setdefault(_reg_canonical(r), set()).add(f"input:{r}")
+
+    if taint_mem_range:
+        start, end = taint_mem_range
+        for addr in range(start, end):
+            mem_taint.setdefault(addr, set()).add(f"input:mem_{hex(start)}")
+
+    # 传播链记录
+    propagation: list[dict] = []
+
+    def _mark_reg(reg: str, tags: set[str], source_insn: str, line_no: int) -> None:
+        """标记寄存器并记录传播链。"""
+        canon = _reg_canonical(reg)
+        if not tags:
+            return
+        old = reg_taint.get(canon, set()).copy()
+        reg_taint.setdefault(canon, set()).update(tags)
+        new_tags = tags - old
+        if new_tags:
+            propagation.append({
+                "type": "reg",
+                "target": canon,
+                "tags": list(new_tags),
+                "insn": source_insn,
+                "line_no": line_no,
+            })
+
+    def _mark_mem(addr: int, tags: set[str], source_insn: str, line_no: int) -> None:
+        """标记内存并记录传播链。"""
+        if not tags:
+            return
+        old = mem_taint.get(addr, set()).copy()
+        mem_taint.setdefault(addr, set()).update(tags)
+        new_tags = tags - old
+        if new_tags:
+            propagation.append({
+                "type": "mem",
+                "target": hex(addr),
+                "tags": list(new_tags),
+                "insn": source_insn,
+                "line_no": line_no,
+            })
+
+    def _get_reg_tags(reg: str) -> set[str]:
+        return reg_taint.get(_reg_canonical(reg), set()).copy()
+
+    def _get_mem_tags(addr: int) -> set[str]:
+        return mem_taint.get(addr, set()).copy()
+
+    for tl in lines:
+        insn = tl.insn.strip()
+        op = insn.split()[0] if insn else ""
+        regs_before = tl.regs_before
+        regs_after = tl.regs_after
+        line_no = tl.line_no
+
+        if not op:
+            continue
+
+        # ── 内存写: str/stp/stur → 标记目标内存 ──
+        if op in STORE_OPS:
+            # 提取写入的寄存器和目标地址
+            mem_addr = _get_mem_addr(insn, regs_before)
+            if mem_addr is not None:
+                # 收集源寄存器的污点
+                store_regs = _extract_regs(insn.split("]")[0] if "]" in insn else insn)
+                # 实际存储的寄存器一般在逗号前（如 stp x29, x30, [sp] → x29, x30）
+                all_tags: set[str] = set()
+                for sr in store_regs:
+                    if sr in regs_before or sr in regs_after:
+                        all_tags.update(_get_reg_tags(sr))
+                if all_tags:
+                    _mark_mem(mem_addr, all_tags, insn, line_no)
+            continue
+
+        # ── 内存读: ldr/ldp/ldur → 从内存继承污点 ──
+        if op in LOAD_OPS:
+            mem_addr = _get_mem_addr(insn, regs_before)
+            if mem_addr is not None:
+                mem_tags = _get_mem_tags(mem_addr)
+                # 目标寄存器（通常是第一个操作数）
+                dest_regs = _extract_regs(insn)
+                if dest_regs and mem_tags:
+                    for dr in [dest_regs[0]]:  # 第一个是目标寄存器
+                        _mark_reg(dr, mem_tags, insn, line_no)
+            continue
+
+        # ── ALU / mov: 结果继承所有源寄存器的污点 ──
+        if op in ALU_OPS:
+            all_regs = _extract_regs(insn)
+            if len(all_regs) >= 2:
+                dest = all_regs[0]  # 第一个是目标
+                src_regs = all_regs[1:]
+                all_src_tags: set[str] = set()
+                for sr in src_regs:
+                    # 检查该寄存器在执行前/后是否有值
+                    if sr in regs_before or sr in regs_after:
+                        all_src_tags.update(_get_reg_tags(sr))
+                    # 检查 w/x 别名
+                    alt = _reg_canonical(sr)
+                    if alt != sr:
+                        all_src_tags.update(_get_reg_tags(alt))
+                if all_src_tags:
+                    _mark_reg(dest, all_src_tags, insn, line_no)
+            continue
+
+        # ── 比较指令（cmp, cmn）：影响标志位 ──
+        if op in {"cmp", "cmn"}:
+            all_regs = _extract_regs(insn)
+            all_src_tags = set()
+            for sr in all_regs:
+                all_src_tags.update(_get_reg_tags(sr))
+            if all_src_tags:
+                # 标记 NZCV 标志位
+                _mark_reg("nzcv", all_src_tags, insn, line_no)
+            continue
+
+        # ── 条件跳转：不传播，但继续跟踪 ──
+        # 什么都不做，只是继续
+
+    # ── 收尾阶段：提取最终污点状态 ──
+    final_reg_taint = {reg: list(tags) for reg, tags in reg_taint.items() if tags}
+    final_mem_taint = {hex(addr): list(tags) for addr, tags in mem_taint.items() if tags}
+
+    # 判断返回值（x0）是否被污染
+    ret_tainted = "x0" in reg_taint and bool(reg_taint["x0"])
+
+    result = {
+        "total_instructions": len(lines),
+        "ret_tainted": ret_tainted,
+        "ret_tags": list(reg_taint.get("x0", set())) if ret_tainted else [],
+        "propagation_count": len(propagation),
+        "result_register_taint": final_reg_taint,
+        "result_memory_taint": final_mem_taint,
+    }
+
+    if not summary:
+        result["propagation"] = propagation
+
+    return result
+
+
+def format_taint_result(result: dict, max_prop: int = 50) -> str:
+    """格式化污点分析结果为人类可读文本。"""
+    lines = []
+    lines.append(f"污点分析结果 — {result['total_instructions']:,} 条指令")
+    lines.append("")
+
+    if result["ret_tainted"]:
+        lines.append(f"  🎯 返回值 x0 被污染! (标签: {', '.join(result['ret_tags'])})")
+    else:
+        lines.append(f"  ✅ 返回值 x0 未被污染")
+
+    lines.append(f"  传播链: {result['propagation_count']} 条")
+    lines.append(f"  污染寄存器: {len(result['result_register_taint'])} 个")
+    lines.append(f"  污染内存: {len(result['result_memory_taint'])} 处")
+    lines.append("")
+
+    if result.get("propagation"):
+        lines.append("传播路径 (前 {} 条):".format(min(max_prop, len(result["propagation"]))))
+        lines.append("")
+        for p in result["propagation"][:max_prop]:
+            if p["type"] == "reg":
+                arrow = "→" if p["target"].startswith("x") or p["target"].startswith("w") else "→"
+                lines.append(f"  L{p['line_no']:>6}  {arrow}  {p['target']:<6}  <- {', '.join(p['tags']):<30}  {p['insn']}")
+            else:
+                lines.append(f"  L{p['line_no']:>6}  →  {p['target']:<22} <- {', '.join(p['tags']):<30}  {p['insn']}")
+
+    return "\n".join(lines)

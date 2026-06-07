@@ -637,6 +637,64 @@ def branch(
         raise typer.Exit(1)
 
 
+# ── taint ──────────────────────────────────────────────────────
+
+@app.command()
+def taint(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    taint_reg: Optional[list[str]] = typer.Option(None, "--taint", help="初始标记的寄存器，如 x2，可多次使用"),
+    taint_mem: Optional[str] = typer.Option(None, "--taint-mem", help="初始标记的内存范围，如 0x7a000000-0x7a000100"),
+    summary: bool = typer.Option(False, "--summary", help="只输出结论，不输出详细传播路径"),
+    max_prop: int = typer.Option(50, "--max-prop", help="最大显示的传播链条数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """污点分析 — 标记输入，跟踪数据传播路径。
+
+    在 trace 中标记一个或多个输入（寄存器/内存），自动跟踪哪些后续指令
+    和返回值受到了影响。用于快速判断参数是否参与了签名/加密计算。
+
+    示例:
+      xfq taint trace.log --taint x2
+      xfq taint trace.log --taint x2 --taint x3
+      xfq taint trace.log --taint-mem 0x7a000000-0x7a000100
+      xfq taint trace.log --taint x2 --summary
+    """
+    try:
+        from .analyzer import taint_analysis, format_taint_result
+        paths = _resolve_path(input, tool_root, log_dir)
+
+        regs = taint_reg
+
+        mem_range = None
+        if taint_mem:
+            parts = taint_mem.split("-")
+            if len(parts) == 2:
+                mem_range = (int(parts[0], 16), int(parts[1], 16))
+
+        if not regs and not mem_range:
+            print("错误: 请至少指定 --taint 或 --taint-mem", file=sys.stderr)
+            raise typer.Exit(1)
+
+        result = taint_analysis(
+            paths=paths,
+            taint_regs=regs,
+            taint_mem_range=mem_range,
+            summary=summary,
+        )
+
+        if json_output:
+            print_json(result)
+            return
+
+        print(format_taint_result(result, max_prop=max_prop))
+
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
 # ── mcp ─────────────────────────────────────────────────────────
 
 @app.command()
