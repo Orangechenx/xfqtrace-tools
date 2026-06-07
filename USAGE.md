@@ -293,19 +293,25 @@ xfq summarize path/to/trace.log
 
 输出示例：
 
-```json
-{
-  "total_instructions": 9703,
-  "patterns": [
-    {"type": "xor_loop", "start_line": 72, "end_line": 75},
-    {"type": "xor_loop", "start_line": 92, "end_line": 95}
-  ],
-  "top_opcodes": [
-    {"opcode": "add", "count": 2183},
-    {"opcode": "eor", "count": 810}
-  ]
-}
 ```
+指令总数: 9,703
+指令行数: 9,703
+识别模式: 402
+  ├─ xor_loop  L72-L75
+  ├─ xor_loop  L92-L95
+  ├─ xor_loop  L112-L115
+  ...
+  ├─ sequential_write  L2-L4     stride=16 count=3
+
+指令分布:
+  add:  2,183
+  ldrb: 1,231
+  strb:   815
+  eor:    810
+  udiv:   782
+```
+
+> 加 `--json` 可输出机器可读的 JSON 格式。
 
 ### 4.2 stack — 调用栈可视化
 
