@@ -66,13 +66,10 @@ def tool_asset(tool_root: Path, *parts: str) -> Path:
     return tool_root.joinpath(*parts)
 
 
-def engine_so_path(tool_root: Path, explicit: str | Path | None = None) -> Path:
-    """引擎 SO 路径，搜索顺序：显式传入 > 环境变量 > vendor/ > 工具目录 bin/ > 工具目录根。
-
-    Args:
-        tool_root: 工具目录（案例/脚本所在目录）。
-        explicit: 用户通过 --so-path 显式指定的路径。
-    """
+def engine_so_path(tool_root: str | Path, explicit: str | Path | None = None) -> Path:
+    """引擎 SO 路径。"""
+    if isinstance(tool_root, str):
+        tool_root = Path(tool_root)
     if explicit:
         p = Path(explicit).expanduser().resolve()
         if p.exists():

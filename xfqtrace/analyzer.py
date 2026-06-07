@@ -88,7 +88,7 @@ def parse_line(line: str, line_no: int = 0) -> TraceLine | None:
     return tl
 
 
-REG_RE = re.compile(r"(?P<reg>[xw]\d+|[a-z0-9]+)=(?P<val>0x[0-9a-fA-F]+|\d+)")
+REG_RE = re.compile(r"(?P<reg>[xw]\d+|[a-z0-9]+)=(?P<val>-?0[xX][0-9a-fA-F]+|-?\d+)")
 
 def _parse_regs(text: str) -> dict[str, int]:
     """从 'x0=0x1234 x1=0x5678' 提取寄存器字典。"""
@@ -97,7 +97,14 @@ def _parse_regs(text: str) -> dict[str, int]:
         name = m.group("reg")
         val_str = m.group("val")
         try:
-            val = int(val_str, 16) if val_str.startswith("0x") else int(val_str)
+            negative = val_str.startswith("-")
+            abs_str = val_str[1:] if negative else val_str
+            if abs_str.startswith("0x") or abs_str.startswith("0X"):
+                val = int(abs_str, 16)
+            else:
+                val = int(abs_str)
+            if negative:
+                val = -val
         except ValueError:
             continue
         result[name] = val
@@ -229,7 +236,7 @@ def detect_mem_copy(lines: list[TraceLine], window: int = 5) -> list[dict]:
             # 检查地址是否连续递增
             addrs = []
             for w in writes:
-                m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", w.insn)
+                m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9a-fA-Fx]+))?\]", w.insn)
                 if not m:
                     break
                 reg = m.group(1)
@@ -320,6 +327,8 @@ def build_stack(paths: list[str | Path] | str | Path | None = None,
     """构建调用栈树。"""
     if isinstance(paths, (str, Path)):
         paths = [Path(paths)]
+    elif paths:
+        paths = [Path(p) if isinstance(p, str) else p for p in paths]
 
     if not paths and package:
         paths = resolve_trace_file(package, log_dir)
@@ -501,6 +510,8 @@ def stats(paths: list[str | Path] | str | Path | None = None,
     """统计 trace 中的调用/指令信息。"""
     if isinstance(paths, (str, Path)):
         paths = [Path(paths)]
+    elif paths:
+        paths = [Path(p) if isinstance(p, str) else p for p in paths]
 
     if not paths and package:
         paths = resolve_trace_file(package, log_dir)
@@ -603,7 +614,7 @@ def regdiff(paths: list[str | Path] | str | Path | None = None,
             "max": hex(max_val.get(reg, 0)),
         })
 
-    results.sort(key=lambda x: x["changes"], reverse=True)
+    results.sort(key=lambda x: (-x["changes"], x["register"]))
     return results
 
 
@@ -644,7 +655,7 @@ def mempat(paths: list[str | Path] | str | Path | None = None,
             ij_op = ij.split()[0] if ij else ""
             if ij_op not in STORE_OPS:
                 break
-            mj = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", ij)
+            mj = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9a-fA-Fx]+))?\]", ij)
             if not mj:
                 break
             bj = tj.regs_before.get(mj.group(1), 0)
@@ -749,7 +760,7 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
             "total": total,
         })
 
-    results.sort(key=lambda x: x["total"], reverse=True)
+    results.sort(key=lambda x: (-x["total"], x["offset"], x["insn"]))
     return results
 
 
@@ -764,9 +775,10 @@ LOAD_OPS = {"ldr", "ldp", "ldrb", "ldrh", "ldur", "ldurb", "ldurh", "ldrsw"}
 # ALU 类（结果继承所有源操作数的污点）
 ALU_OPS = {"add", "sub", "eor", "and", "orr", "bic", "orn",
            "lsl", "lsr", "asr", "mul", "udiv", "sdiv",
-           "csel", "csinc", "csinv", "csneg",
+           "csel", "csinc", "csinv", "csneg", "cset",
            "madd", "msub", "smull", "umull", "smulh", "umulh",
            "movk", "adrp",
+           "uxtb", "uxth", "uxtw", "sxtb", "sxth", "sxtw",
            "mov", "mvn", "neg", "lslv", "lsrv", "asrv", "ror", "rorv"}
 
 
@@ -785,22 +797,40 @@ def _extract_regs(insn: str) -> list[str]:
 
 
 def _get_mem_addr(insn: str, regs_before: dict[str, int]) -> int | None:
-    """从 str/ldr 指令的 [base, #offset] 形式计算绝对地址。"""
-    m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", insn)
-    if not m:
-        return None
-    base_reg = m.group(1)
-    base_val = regs_before.get(base_reg, 0)
-    off_str = m.group(2)
-    if off_str:
-        off_str = off_str.replace("#", "")
-        try:
-            offset = int(off_str, 16) if "0x" in off_str else int(off_str)
-        except ValueError:
+    """从 str/ldr 指令的 [base, #offset] 或 [base, index, extend] 形式计算绝对地址。"""
+    # Form 1: [base, #offset] — simple offset
+    m = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9a-fA-Fx]+))?\]", insn)
+    if m:
+        base_reg = m.group(1)
+        base_val = regs_before.get(base_reg, 0)
+        off_str = m.group(2)
+        if off_str:
+            off_str = off_str.replace("#", "")
+            try:
+                offset = int(off_str, 16) if "0x" in off_str else int(off_str)
+            except ValueError:
+                offset = 0
+        else:
             offset = 0
-    else:
-        offset = 0
-    return base_val + offset
+        return base_val + offset
+
+    # Form 2: [base, index, extend {#scale}] — extended register
+    m2 = re.search(
+        r"\[(x\d+|w\d+|sp),\s*(x\d+|w\d+),\s*(uxtw|uxtb|uxth|sxtw|sxtb|sxth|lsl)(?:\s+#(\d+))?\]",
+        insn,
+    )
+    if m2:
+        base_reg = m2.group(1)
+        index_reg = m2.group(2)
+        scale_str = m2.group(4)
+        base_val = regs_before.get(base_reg, 0)
+        idx_val = regs_before.get(index_reg, 0)
+        scale = int(scale_str) if scale_str else 0
+        if scale:
+            idx_val = idx_val << scale  # lsl #N = << N
+        return base_val + idx_val
+
+    return None
 
 
 # 寄存器别名映射（w0 → x0, w1 → x1 等）
@@ -926,32 +956,43 @@ def taint_analysis(
             if mem_addr is not None:
                 # 收集源寄存器的污点
                 store_regs = _extract_regs(insn.split("]")[0] if "]" in insn else insn)
-                # 实际存储的寄存器一般在逗号前（如 stp x29, x30, [sp] → x29, x30）
-                all_tags: set[str] = set()
-                for sr in store_regs:
-                    canon = _reg_canonical(sr)
-                    if sr in regs_before or sr in regs_after or canon in regs_before or canon in regs_after:
-                        all_tags.update(_get_reg_tags(sr))
-                if all_tags:
-                    _mark_mem(mem_addr, all_tags, insn, line_no)
-                    # stp 存两个寄存器，第二个在 +8 偏移处
-                    if op == "stp" and len(store_regs) >= 2:
-                        _mark_mem(mem_addr + 8, all_tags, insn, line_no)
+                if op == "stp" and len(store_regs) >= 2:
+                    # STP: 每个寄存器单独标记对应地址
+                    tags_0 = _get_reg_tags(store_regs[0])
+                    tags_1 = _get_reg_tags(store_regs[1])
+                    if tags_0:
+                        _mark_mem(mem_addr, tags_0, insn, line_no)
+                    if tags_1:
+                        _mark_mem(mem_addr + 8, tags_1, insn, line_no)
+                else:
+                    # STR/STUR/STRB: 收集源寄存器的污点
+                    all_tags: set[str] = set()
+                    for sr in store_regs:
+                        canon = _reg_canonical(sr)
+                        if sr in regs_before or sr in regs_after or canon in regs_before or canon in regs_after:
+                            all_tags.update(_get_reg_tags(sr))
+                    if all_tags:
+                        _mark_mem(mem_addr, all_tags, insn, line_no)
             continue
 
         # ── 内存读: ldr/ldp/ldur → 从内存继承污点 ──
         if op in LOAD_OPS:
             mem_addr = _get_mem_addr(insn, regs_before)
             if mem_addr is not None:
-                mem_tags = _get_mem_tags(mem_addr)
-                # ldp 读两个寄存器，第二个在 +8 偏移处
-                if op == "ldp":
-                    mem_tags.update(_get_mem_tags(mem_addr + 8))
-                # 目标寄存器（通常是第一个操作数）
                 dest_regs = _extract_regs(insn)
-                if dest_regs and mem_tags:
-                    for dr in dest_regs:  # ldp 可能有多个目标寄存器
-                        _mark_reg(dr, mem_tags, insn, line_no)
+                if op == "ldp" and len(dest_regs) >= 2:
+                    # LDP: 每个目标寄存器继承对应地址的污点
+                    tags_0 = _get_mem_tags(mem_addr)
+                    tags_1 = _get_mem_tags(mem_addr + 8)
+                    if tags_0:
+                        _mark_reg(dest_regs[0], tags_0, insn, line_no)
+                    if tags_1:
+                        _mark_reg(dest_regs[1], tags_1, insn, line_no)
+                elif dest_regs:
+                    mem_tags = _get_mem_tags(mem_addr)
+                    if mem_tags:
+                        for dr in dest_regs:
+                            _mark_reg(dr, mem_tags, insn, line_no)
             continue
 
         # ── ALU / mov: 结果继承所有源寄存器的污点 ──
@@ -971,16 +1012,18 @@ def taint_analysis(
                         all_src_tags.update(_get_reg_tags(alt))
                 if all_src_tags:
                     _mark_reg(dest, all_src_tags, insn, line_no)
-            elif op == "movk" and all_regs:
-                # movk 会读取并修改目标寄存器，保留已有污点
+            elif op in {"movk", "cset"} and all_regs:
+                # movk/cset：读取并修改目标寄存器，保留已有污点
+                # cset 还读取 nzcv 标志位
                 dest = all_regs[0]
                 existing = _get_reg_tags(dest)
+                existing.update(_get_reg_tags("nzcv"))
                 if existing:
                     _mark_reg(dest, existing, insn, line_no)
             continue
 
-        # ── 比较指令（cmp, cmn）：影响标志位 ──
-        if op in {"cmp", "cmn"}:
+        # ── 比较/测试指令（cmp, cmn, tst）：影响标志位 ──
+        if op in {"cmp", "cmn", "tst"}:
             all_regs = _extract_regs(insn)
             all_src_tags = set()
             for sr in all_regs:
