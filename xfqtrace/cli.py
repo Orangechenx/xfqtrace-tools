@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -329,7 +330,10 @@ def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: s
     from pathlib import Path
 
     if package_or_path and Path(package_or_path).exists():
-        return [Path(package_or_path).resolve()]
+        p = Path(package_or_path).resolve()
+        if p.is_dir():
+            raise FileNotFoundError(f"路径是目录，不是 trace 文件: {package_or_path}")
+        return [p]
 
     pkg = package_or_path or ""
     if not pkg:
@@ -644,11 +648,11 @@ def branch(
         if json_output:
             print_json({"branches": results})
             return
+        if threshold > 0:
+            results = [r for r in results if r["taken_ratio"] >= threshold]
         if not results:
             print("未发现条件分支指令")
             return
-        if threshold > 0:
-            results = [r for r in results if r["taken_ratio"] >= threshold]
         print(f"{'模块':<35} {'偏移':<12} {'指令':<25} {'跳转':<8} {'不跳':<8} {'跳转率':<8}")
         print("-" * 100)
         for r in results[:30]:
@@ -688,6 +692,17 @@ def taint(
         paths = _resolve_path(input, tool_root, log_dir)
 
         regs = taint_reg
+        if regs:
+            cleaned = []
+            for r in regs:
+                # 允许 --taint x2=0x41 (=号后忽略) 也允许纯 --taint x2
+                bare = r.split("=", 1)[0] if "=" in r else r
+                if re.match(r"^[xw]\d+$", bare) or bare == "sp":
+                    cleaned.append(bare)
+                else:
+                    print(f"错误: 无效的寄存器名 '{bare}'，应为 x0~x30/w0~w30/sp", file=sys.stderr)
+                    raise typer.Exit(1)
+            regs = cleaned
 
         mem_range = None
         if taint_mem:

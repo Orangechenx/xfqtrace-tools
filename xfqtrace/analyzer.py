@@ -599,7 +599,8 @@ def mempat(paths: list[str | Path] | str | Path | None = None,
         insn = tl.insn
 
         # 只看内存写指令
-        if not any(op in insn for op in ["str ", "stp ", "stur "]):
+        op0 = insn.split()[0] if insn else ""
+        if op0 not in STORE_OPS:
             i += 1
             continue
 
@@ -608,7 +609,8 @@ def mempat(paths: list[str | Path] | str | Path | None = None,
         for j in range(i, min(i + 20, len(lines))):
             tj = lines[j]
             ij = tj.insn
-            if not any(op in ij for op in ["str ", "stp ", "stur "]):
+            ij_op = ij.split()[0] if ij else ""
+            if ij_op not in STORE_OPS:
                 break
             mj = re.search(r"\[(x\d+|w\d+|sp)(?:,\s*(#[\-0-9x]+))?\]", ij)
             if not mj:
