@@ -1,5 +1,5 @@
 [project]
-name = "xfqtrace"
+name = "xfqtrace-cli"
 version = "0.3.0"
 description = "真机 Android NDK 指令级 trace 工具 — CLI + MCP Server"
 readme = "README.md"
@@ -29,9 +29,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Orangechenx/xfqtrace"
-Repository = "https://github.com/Orangechenx/xfqtrace"
-Documentation = "https://github.com/Orangechenx/xfqtrace#readme"
+Homepage = "https://github.com/Orangechenx/xfqtrace-cli"
+Repository = "https://github.com/Orangechenx/xfqtrace-cli"
+Documentation = "https://github.com/Orangechenx/xfqtrace-cli#readme"
 
 [project.scripts]
 xfqtrace = "xfqtrace.cli:app"

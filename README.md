@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-pip install git+https://github.com/Orangechenx/xfqtrace.git
+pip install git+https://github.com/Orangechenx/xfqtrace-cli.git
 
 # 检查环境
 xfqtrace doctor
