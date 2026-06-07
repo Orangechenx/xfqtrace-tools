@@ -436,6 +436,8 @@ trace 日志格式示例：
 
 ## 6. MCP Server 配置
 
+MCP Server 支持两种传输格式自动探测，兼容所有标准 MCP 客户端。
+
 ### Claude Desktop
 
 ```json
@@ -451,16 +453,48 @@ trace 日志格式示例：
 
 ### Cursor
 
+Settings → Features → MCP Servers → Add New：
+
 ```
 Name: xfqtrace
+Type: command
 Command: xfq
 Args: mcp
 ```
 
-### 手动测试 MCP Server
+### Windsurf
+
+MCP 配置文件中添加：
+
+```json
+{
+  "mcpServers": {
+    "xfqtrace": {
+      "command": "xfq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### VS Code (GitHub Copilot / Continue)
+
+`.vscode/mcp.json` 或 Continue 插件配置：
+
+```json
+{
+  "mcpServers": {
+    "xfqtrace": {
+      "command": "xfq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### 手动测试
 
 ```bash
-# 启动后，用以下 JSON Lines 格式交互
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 ```
 

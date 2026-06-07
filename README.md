@@ -73,10 +73,12 @@ xfq mcp
 
 支持两种传输格式自动探测：
 
-- **Content-Length** — 兼容 Claude Desktop、Cursor 等标准 MCP 客户端
+- **Content-Length** — 兼容所有标准 MCP 客户端
 - **JSON Lines** — Python MCP SDK 原生格式
 
-配置 Claude Desktop：
+配置方式针对不同客户端：
+
+### Claude Desktop
 
 ```json
 {
@@ -88,6 +90,65 @@ xfq mcp
   }
 }
 ```
+
+### Cursor
+
+Settings → Features → MCP Servers → Add New：
+
+```
+Name: xfqtrace
+Type: command
+Command: xfq
+Args: mcp
+```
+
+### Windsurf
+
+`.windsurfrules` 或 MCP 配置文件中添加：
+
+```json
+{
+  "mcpServers": {
+    "xfqtrace": {
+      "command": "xfq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### VS Code (GitHub Copilot / Continue)
+
+`.vscode/mcp.json` 或 Continue 配置：
+
+```json
+{
+  "mcpServers": {
+    "xfqtrace": {
+      "command": "xfq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### 手动测试
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
+```
+
+### 可用工具
+
+| 工具名 | 功能 |
+|---|---|
+| `xfqtrace_info` | 检查工具资产和案例列表 |
+| `xfqtrace_doctor` | 检查设备连接和 frida 状态 |
+| `xfqtrace_generate_config` | 生成 Frida hook 脚本 |
+| `xfqtrace_run` | 构建或执行 trace |
+| `xfqtrace_list_logs` | 列出本地日志 |
+| `xfqtrace_preview_log` | 预览日志内容 |
+| `xfqtrace_logcat_command` | 生成 logcat 监控命令 |
 
 ## 致谢
 
