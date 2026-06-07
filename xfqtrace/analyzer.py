@@ -797,7 +797,8 @@ def taint_analysis(
 
     lines = list(iter_lines(paths=paths, text=text))
     if not lines:
-        return {"total_instructions": 0, "propagation": [], "result_register_taint": {}, "result_memory_taint": {}}
+        return {"total_instructions": 0, "ret_tainted": False, "ret_tags": [], "propagation_count": 0,
+                "propagation": [], "result_register_taint": {}, "result_memory_taint": {}}
 
     # 污点状态
     reg_taint: dict[str, set[str]] = {}  # 寄存器 → {污点标签}
