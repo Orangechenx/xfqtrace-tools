@@ -62,14 +62,26 @@ xfq mcp
 
 | 命令 | 说明 |
 |---|---|
+| **设备 & 资产** | |
 | `doctor` | 检查 adb/frida/frida-server/资产 |
 | `info` | 查看工具资产和案例列表 |
 | `add` | 将 libxfqtrace.so 复制到包内 _vendor/ 目录 |
+| **Trace 执行** | |
 | `gen-config` | 生成 Frida hook 脚本 |
 | `run` | 执行 trace（默认 dry-run） |
 | `pull-only` | 仅拉取设备 trace 日志 |
 | `list-logs` | 列出本地日志 |
 | `preview-log` | 预览日志内容 |
+| **Trace 分析** | |
+| `summarize` | 智能摘要 — 识别 XOR 循环、内存拷贝等算法模式 |
+| `stack` | 调用栈可视化 — 重建函数调用树 |
+| `grep` | 结构化查询 — 按 PC/指令/寄存器条件过滤 |
+| `slice` | 切片导出 — 裁剪 trace 到指定范围 |
+| `stats` | API 调用统计 — 函数调用次数和指令分布 |
+| `regdiff` | 寄存器变化热力图 — 统计寄存器变化情况 |
+| `mempat` | 内存访问模式检测 — 识别连续内存拷贝/置零 |
+| `branch` | 分支命中率分析 — 条件跳转统计 |
+| **MCP** | |
 | `logcat` | 输出 logcat 监控命令 |
 | `mcp` | 启动 MCP Server |
 

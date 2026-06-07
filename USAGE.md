@@ -15,10 +15,19 @@
    - [list-logs / preview-log](#36-list-logs--preview-log-日志管理)
    - [logcat](#37-logcat-监控命令)
    - [mcp](#38-mcp-server)
-4. [配置详解](#4-配置详解)
-5. [实战场景](#5-实战场景)
-6. [MCP Server 配置](#6-mcp-server-配置)
-7. [常见问题](#7-常见问题)
+4. [Trace 分析命令](#4-trace-分析命令)
+   - [summarize](#41-summarize--算法模式识别)
+   - [stack](#42-stack--调用栈可视化)
+   - [grep](#43-grep--结构化查询)
+   - [slice](#44-slice--切片导出)
+   - [stats](#45-stats--调用指令统计)
+   - [regdiff](#46-regdiff--寄存器变化热力图)
+   - [mempat](#47-mempat--内存访问模式)
+   - [branch](#48-branch--分支命中率分析)
+5. [配置详解](#5-配置详解)
+6. [实战场景](#6-实战场景)
+7. [MCP Server 配置](#7-mcp-server-配置)
+8. [常见问题](#8-常见问题)
 
 ---
 
@@ -266,8 +275,173 @@ xfq mcp
 ```
 
 ---
+## 4. Trace 分析命令
 
-## 4. 配置详解
+安装引擎 SO 并成功 trace 后，使用以下命令对日志进行分析。
+
+### 4.1 summarize — 算法模式识别
+
+自动识别 XOR 解密循环、连续内存拷贝等常见算法模式。
+
+```bash
+# 分析最新日志
+xfq summarize
+
+# 指定日志文件
+xfq summarize path/to/trace.log
+```
+
+输出示例：
+
+```json
+{
+  "total_instructions": 9703,
+  "patterns": [
+    {"type": "xor_loop", "start_line": 72, "end_line": 75},
+    {"type": "xor_loop", "start_line": 92, "end_line": 95}
+  ],
+  "top_opcodes": [
+    {"opcode": "add", "count": 2183},
+    {"opcode": "eor", "count": 810}
+  ]
+}
+```
+
+### 4.2 stack — 调用栈可视化
+
+重建函数调用树，一眼看清执行脉络。
+
+```bash
+xfq stack                    # 最新 trace
+xfq stack trace.log          # 指定文件
+xfq stack trace.log --no-collapse   # 不折叠重复调用
+```
+
+输出：
+
+```
+├─ sub_0x55080
+├─ sub_0x5511c
+├─ sub_0x1980a0
+  ├─ dlopen
+  ├─ sub_0x55080
+  ├─ sub_0x5511c
+    ... x99
+```
+
+### 4.3 grep — 结构化查询
+
+按 PC 范围、指令类型、模块、寄存器值过滤 trace 行。
+
+```bash
+# 按指令类型过滤
+xfq grep trace.log --opcode eor
+
+# PC 范围过滤
+xfq grep trace.log --pc-range 0x55000-0x56000
+
+# 模块名过滤
+xfq grep trace.log --module libsgmain
+
+# 寄存器值过滤
+xfq grep trace.log --reg x0=0x1234
+
+# 组合过滤，最多显示 10 条
+xfq grep trace.log --opcode str --module libc --max 10
+```
+
+### 4.4 slice — 切片导出
+
+从大 trace 中裁剪指定范围，生成新文件。
+
+```bash
+# 按行号范围
+xfq slice trace.log --line-start 100 --line-end 500 --output snippet.log
+
+# 按 PC 地址范围
+xfq slice trace.log --pc-range 0x55000-0x56000 --output snippet.log
+
+# 限制最大行数
+xfq slice trace.log --line-start 1 --line-end 1000 --max 200 --output snippet.log
+```
+
+### 4.5 stats — 调用/指令统计
+
+统计函数调用次数和指令分布。
+
+```bash
+xfq stats trace.log
+```
+
+输出：
+
+```
+指令总数: 9,703
+函数调用: 87
+
+调用分布 (Top 10):
+  sub_0x55080                          15 ███████████████
+  sub_0x5511c                          14 ██████████████
+
+指令分布 (Top 10):
+  add                     2183
+  ldrb                    1231
+```
+
+### 4.6 regdiff — 寄存器变化热力图
+
+统计每个寄存器的变化次数、首次/末次值，快速发现关键寄存器。
+
+```bash
+# 全部寄存器
+xfq regdiff trace.log
+
+# 关注特定寄存器
+xfq regdiff trace.log --regs x0,x1,x8
+```
+
+输出：
+
+```
+寄存器  变化次数  首次值                  末次值
+x8     595      0x74f6278000             0x42fad59f84b95c4d
+x0     7        0x74f817a178             0x7645456a10
+```
+
+### 4.7 mempat — 内存访问模式
+
+检测连续内存写入模式（memcpy / memset 特征）。
+
+```bash
+xfq mempat trace.log
+```
+
+输出：
+
+```
+sequential_write     L1-L5    stride=8 count=5
+```
+
+### 4.8 branch — 分支命中率分析
+
+统计条件跳转指令的跳转/不跳转次数，识别死代码和关键决策点。
+
+```bash
+xfq branch trace.log
+xfq branch trace.log --min-rate 90   # 只看跳转率 > 90% 的分支
+```
+
+输出：
+
+```
+模块                 偏移      指令         跳转   不跳   跳转率
+libsgmainso          0x55110   b.ne #-0x4c  156    0     100.0%
+libsgmainso          0x55084   cbz w1,#0x90 15     0     100.0%
+```
+
+---
+
+## 5. 配置详解
 
 ### `hook_format.args` 和 `hook_format.ret` 支持的 tag
 
@@ -330,9 +504,9 @@ const CONFIG = {
 
 ---
 
-## 5. 实战场景
+## 6. 实战场景
 
-### 5.1 场景一：首次 trace 一个 APP
+### 6.1 场景一：首次 trace 一个 APP
 
 ```bash
 # 1. 查看 APP 进程确认包名
@@ -360,7 +534,7 @@ xfq run -p com.target.app --timeout 60 --execute
 xfq preview-log -p com.target.app
 ```
 
-### 5.2 场景二：大麦 doCommandNative（按 cmd 过滤）
+### 6.2 场景二：大麦 doCommandNative（按 cmd 过滤）
 
 ```bash
 # 先看 SO 版本
@@ -383,7 +557,7 @@ xfq gen-config \
 xfq run -p cn.damai --timeout 60 --execute
 ```
 
-### 5.3 场景三：attach 已运行进程
+### 6.3 场景三：attach 已运行进程
 
 ```bash
 # 先打开 APP，确保进程在运行
@@ -393,7 +567,7 @@ adb shell "monkey -p com.douban.frodo -c android.intent.category.LAUNCHER 1"
 xfq run -p com.douban.frodo --attach --execute
 ```
 
-### 5.4 场景四：带 bypass 反检测
+### 6.4 场景四：带 bypass 反检测
 
 ```bash
 # 星巴克（梆梆加固）
@@ -411,7 +585,7 @@ xfq run -p com.example.app --bypass anti_debug,msa --execute
 | `bangbang` | `bypass_bangbang.js` | 邦梆加固 `libDexHelper.so` 检测 |
 | `msa` | `bypass_msa.js` | MSA（小米安全）检测 |
 
-### 5.5 场景五：查看 trace 日志
+### 6.5 场景五：查看 trace 日志
 
 ```bash
 # 查看所有 run
@@ -437,7 +611,7 @@ trace 日志格式示例：
 
 ---
 
-## 6. MCP Server 配置
+## 7. MCP Server 配置
 
 MCP Server 支持两种传输格式自动探测，兼容所有标准 MCP 客户端。
 
@@ -525,7 +699,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 
 ---
 
-## 7. 常见问题
+## 8. 常见问题
 
 ### Q: 找不到进程 / attach 失败
 
