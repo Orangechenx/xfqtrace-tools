@@ -918,7 +918,8 @@ def taint_analysis(
                 # 实际存储的寄存器一般在逗号前（如 stp x29, x30, [sp] → x29, x30）
                 all_tags: set[str] = set()
                 for sr in store_regs:
-                    if sr in regs_before or sr in regs_after:
+                    canon = _reg_canonical(sr)
+                    if sr in regs_before or sr in regs_after or canon in regs_before or canon in regs_after:
                         all_tags.update(_get_reg_tags(sr))
                 if all_tags:
                     _mark_mem(mem_addr, all_tags, insn, line_no)
