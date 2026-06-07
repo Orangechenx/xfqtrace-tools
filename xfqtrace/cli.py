@@ -337,7 +337,6 @@ def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: s
         from .analyzer import resolve_trace_file
         tr = resolve_tool_root(tool_root)
         base = Path(log_dir) if log_dir else tr
-        # 遍历寻找最新日志
         candidates = sorted(
             [d for d in base.rglob("*.log*") if d.is_file() and not d.name.endswith(".lz4")],
             key=lambda x: x.stat().st_mtime, reverse=True,
@@ -350,6 +349,11 @@ def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: s
     return resolve_trace_file(pkg, log_dir)
 
 
+def _add_json_flag() -> bool:
+    """在 typer 上下文中标记 --json，作为默认参数。"""
+    return False
+
+
 # ── summarize ──────────────────────────────────────────────────
 
 @app.command()
@@ -357,13 +361,30 @@ def summarize(
     input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
     tool_root: Optional[str] = typer.Option(None, "--tool-root"),
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """智能摘要 — 识别 XOR 循环、内存拷贝等算法模式。"""
     try:
         from .analyzer import summarize
         paths = _resolve_path(input, tool_root, log_dir)
         result = summarize(paths=paths)
-        print_json(result)
+
+        if json_output:
+            print_json(result)
+            return
+
+        print(f"指令总数: {result['total_instructions']:,}")
+        print(f"指令行数: {result['total_lines']:,}")
+        print(f"识别模式: {len(result['patterns'])}")
+        for p in result['patterns'][:20]:
+            print(f"  ├─ {p['type']}  L{p['start_line']}-L{p['end_line']}")
+        if len(result['patterns']) > 20:
+            print(f"  ... 还有 {len(result['patterns']) - 20} 个")
+        if result['top_opcodes']:
+            print(f"\n热门指令 Top 10:")
+            for o in result['top_opcodes'][:10]:
+                bar = "█" * min(o['count'] // 10, 50)
+                print(f"  {o['opcode']:<12} {o['count']:>6}  {bar}")
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)
@@ -378,6 +399,7 @@ def stack(
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
     max_depth: int = typer.Option(20, "--max-depth"),
     no_collapse: bool = typer.Option(False, "--no-collapse", help="不折叠重复调用"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """调用栈可视化 — 重建函数调用树。"""
     try:
@@ -386,6 +408,11 @@ def stack(
         calls = build_stack(paths=paths, max_depth=max_depth)
         if not calls:
             print("未发现函数调用记录")
+            if json_output:
+                print_json({"calls": [], "count": 0})
+            return
+        if json_output:
+            print_json({"calls": calls, "count": len(calls)})
             return
         print(format_stack_tree(calls, collapse_repeats=not no_collapse))
         print(f"\n总调用数: {len(calls)}")
@@ -406,6 +433,7 @@ def grep(
     module: Optional[str] = typer.Option(None, "--module", help="模块名过滤"),
     reg: Optional[str] = typer.Option(None, "--reg", help="寄存器条件，如 x0=0x1234"),
     max_results: int = typer.Option(50, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """结构化查询 — 按条件过滤 trace 指令。"""
     try:
@@ -426,6 +454,9 @@ def grep(
 
         results = grep_func(paths=paths, pc_range=pc_range_tuple, opcode=opcode,
                            module=module, reg_filter=reg_filter, max_results=max_results)
+        if json_output:
+            print_json({"matches": len(results), "results": results})
+            return
         if not results:
             print("未匹配到结果")
             return
@@ -447,6 +478,7 @@ def slice(
     line_start: int = typer.Option(0, "--line-start", help="起始行号"),
     line_end: int = typer.Option(0, "--line-end", help="结束行号"),
     max_lines: int = typer.Option(0, "--max", help="最大输出行数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """切片导出 — 裁剪 trace 到指定范围。"""
     try:
@@ -467,7 +499,13 @@ def slice(
 
         result = slice_trace(paths[0], output, pc_range=pc_range_tuple,
                             line_range=line_range, max_lines=max_lines)
-        print_json(result)
+        if json_output:
+            print_json(result)
+            return
+        print(f"切片完成: {result['written_lines']} 行 -> {result['output']}")
+        print(f"  总行数: {result['total_lines']}, 匹配写入: {result['written_lines']}, 跳过: {result['skipped_lines']}")
+        src_size = result['input_size']
+        print(f"  输入大小: {src_size:,} bytes")
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)
@@ -480,23 +518,28 @@ def stats(
     input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
     tool_root: Optional[str] = typer.Option(None, "--tool-root"),
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """API 调用统计 — 统计函数调用次数和指令分布。"""
     try:
         from .analyzer import stats as stats_func
         paths = _resolve_path(input, tool_root, log_dir)
         result = stats_func(paths=paths)
+        if json_output:
+            print_json(result)
+            return
         print(f"指令总数: {result['total_instructions']:,}")
         print(f"函数调用: {result['total_calls']:,}")
         if result.get("calls"):
             print(f"\n调用分布 (Top {min(10, len(result['calls']))}):")
             for c in result["calls"][:10]:
                 bar = "█" * min(c["count"], 50)
-                print(f"  {c['name']:<40} {c['count']:>6} {bar}")
+                print(f"  {c['name']:<40} {c['count']:>6}  {bar}")
         if result.get("top_opcodes"):
             print(f"\n指令分布 (Top 10):")
             for o in result["top_opcodes"][:10]:
-                print(f"  {o['opcode']:<20} {o['count']:>6}")
+                bar = "█" * min(o['count'] // 10, 50)
+                print(f"  {o['opcode']:<12} {o['count']:>6}  {bar}")
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)
@@ -510,6 +553,7 @@ def regdiff(
     tool_root: Optional[str] = typer.Option(None, "--tool-root"),
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
     regs: Optional[str] = typer.Option(None, "--regs", help="关注的寄存器，逗号分隔"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """寄存器变化热力图 — 统计每个寄存器的变化情况。"""
     try:
@@ -517,6 +561,9 @@ def regdiff(
         paths = _resolve_path(input, tool_root, log_dir)
         target_regs = [r.strip() for r in regs.split(",") if r.strip()] if regs else None
         results = regdiff_func(paths=paths, target_regs=target_regs)
+        if json_output:
+            print_json({"registers": results})
+            return
         if not results:
             print("未捕获到寄存器变化")
             return
@@ -536,12 +583,16 @@ def mempat(
     input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
     tool_root: Optional[str] = typer.Option(None, "--tool-root"),
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """内存访问模式检测 — 识别连续内存拷贝 / 置零等。"""
     try:
         from .analyzer import mempat as mempat_func
         paths = _resolve_path(input, tool_root, log_dir)
         results = mempat_func(paths=paths)
+        if json_output:
+            print_json({"patterns": results})
+            return
         if not results:
             print("未发现连续内存访问模式")
             return
@@ -561,16 +612,19 @@ def branch(
     tool_root: Optional[str] = typer.Option(None, "--tool-root"),
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
     threshold: float = typer.Option(0.0, "--min-rate", help="最低跳转率过滤 0-100"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """分支命中率分析 — 统计条件跳转的跳转/不跳转次数。"""
     try:
         from .analyzer import branch_analysis
         paths = _resolve_path(input, tool_root, log_dir)
         results = branch_analysis(paths=paths)
+        if json_output:
+            print_json({"branches": results})
+            return
         if not results:
             print("未发现条件分支指令")
             return
-        # 过滤
         if threshold > 0:
             results = [r for r in results if r["taken_ratio"] >= threshold]
         print(f"{'模块':<35} {'偏移':<12} {'指令':<25} {'跳转':<8} {'不跳':<8} {'跳转率':<8}")
