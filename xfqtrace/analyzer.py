@@ -890,6 +890,9 @@ def taint_analysis(
                         all_tags.update(_get_reg_tags(sr))
                 if all_tags:
                     _mark_mem(mem_addr, all_tags, insn, line_no)
+                    # stp 存两个寄存器，第二个在 +8 偏移处
+                    if op == "stp" and len(store_regs) >= 2:
+                        _mark_mem(mem_addr + 8, all_tags, insn, line_no)
             continue
 
         # ── 内存读: ldr/ldp/ldur → 从内存继承污点 ──
@@ -897,10 +900,13 @@ def taint_analysis(
             mem_addr = _get_mem_addr(insn, regs_before)
             if mem_addr is not None:
                 mem_tags = _get_mem_tags(mem_addr)
+                # ldp 读两个寄存器，第二个在 +8 偏移处
+                if op == "ldp":
+                    mem_tags.update(_get_mem_tags(mem_addr + 8))
                 # 目标寄存器（通常是第一个操作数）
                 dest_regs = _extract_regs(insn)
                 if dest_regs and mem_tags:
-                    for dr in [dest_regs[0]]:  # 第一个是目标寄存器
+                    for dr in dest_regs:  # ldp 可能有多个目标寄存器
                         _mark_reg(dr, mem_tags, insn, line_no)
             continue
 
