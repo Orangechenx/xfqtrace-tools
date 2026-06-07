@@ -102,9 +102,9 @@ Command: xfq
 Args: mcp
 ```
 
-### Windsurf
+### Windsurf / Codex CLI / Claude Code 等 CLI 工具
 
-`.windsurfrules` 或 MCP 配置文件中添加：
+所有基于 stdio 的 MCP CLI 工具配置方式相同，只是配置文件路径不同：
 
 ```json
 {
@@ -116,6 +116,16 @@ Args: mcp
   }
 }
 ```
+
+配置文件位置：
+
+| 工具 | 路径 |
+|---|---|
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| Codex CLI | `~/.codexclirc` 或环境变量 `CODEX_MCP_SERVERS` |
+| Claude Code | 环境变量 `CLAUDE_CODE_MCP_SERVERS` |
+| Cline | `~/.cline/mcp_settings.json` |
+| 通用 MCP 客户端 | 任意支持 stdio 传输的 MCP 配置 |
 
 ### VS Code (GitHub Copilot / Continue)
 
