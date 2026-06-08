@@ -19,11 +19,14 @@
    - [summarize](#41-summarize--算法模式识别)
    - [stack](#42-stack--调用栈可视化)
    - [grep](#43-grep--结构化查询)
-   - [slice](#44-slice--切片导出)
-   - [stats](#45-stats--调用指令统计)
-   - [regdiff](#46-regdiff--寄存器变化热力图)
-   - [mempat](#47-mempat--内存访问模式)
-   - [branch](#48-branch--分支命中率分析)
+   - [search-seq](#44-search-seq--指令序列搜索)
+   - [slice](#45-slice--切片导出)
+   - [stats](#46-stats--调用指令统计)
+   - [regdiff](#47-regdiff--寄存器变化热力图)
+   - [mempat](#48-mempat--内存访问模式)
+   - [branch](#49-branch--分支命中率分析)
+   - [taint](#410-taint--污点分析)
+   - [index / query](#411-index--query--sqlite-索引查询)
 5. [配置详解](#5-配置详解)
 6. [实战场景](#6-实战场景)
 7. [MCP Server 配置](#7-mcp-server-配置)
@@ -39,12 +42,58 @@
 pip install git+https://github.com/Orangechenx/xfqtrace-tools.git
 
 # 或直接从 Release 安装
-# pip install https://github.com/Orangechenx/xfqtrace-tools/releases/download/v1.3.0/xfqtrace_tools-1.3.0-py3-none-any.whl
+# pip install https://github.com/Orangechenx/xfqtrace-tools/releases/download/v1.3.2/xfqtrace_tools-1.3.2-py3-none-any.whl
 ```
 
 安装后 `xfq` 和 `xfqtrace` 两个命令自动可用。
 
 > **注意：** `libxfqtrace.so` 是 xfQTrace 的 native 引擎，不随 pip 包分发。需自行下载后通过 `xfq add /path/to/libxfqtrace.so` 安装。
+
+### 更新已安装版本
+
+如果你通过 GitHub 源码地址安装，更新时直接重新安装：
+
+```bash
+python -m pip install -U --force-reinstall git+https://github.com/Orangechenx/xfqtrace-tools.git
+```
+
+这条命令由 pip 在临时目录拉取源码并覆盖当前 Python 包，不会和你本地已有项目目录产生 Git 冲突。
+
+如果你通过 Release wheel 安装，换成新版本 wheel 地址：
+
+```bash
+python -m pip install -U https://github.com/Orangechenx/xfqtrace-tools/releases/download/v1.3.2/xfqtrace_tools-1.3.2-py3-none-any.whl
+```
+
+如果你是本地源码开发安装：
+
+```bash
+cd /path/to/xfqtrace-tools
+python -m pip install -U -e .
+```
+
+只有进入已有源码目录执行 `git pull` 时，才可能和本地未提交修改冲突。开发者应先检查状态：
+
+```bash
+git status
+git add .
+git commit -m "更新 xfqtrace 工具"
+git pull --rebase
+```
+
+或者临时保存本地修改：
+
+```bash
+git stash push -m "本地 xfqtrace 修改"
+git pull --rebase
+git stash pop
+```
+
+`libxfqtrace.so` 不随 pip 包更新。如果 native 引擎也有新版本，需要重新安装引擎：
+
+```bash
+xfq add /path/to/new/libxfqtrace.so
+```
 
 ### 确认安装
 
@@ -277,7 +326,7 @@ xfq mcp
 ---
 ## 4. Trace 分析命令
 
-安装引擎 SO 并成功 trace 后，使用以下命令对日志进行分析。
+安装引擎 SO 并成功 trace 后，使用以下命令对日志进行分析。分析命令可以直接读取 `.log` 和 `.log.lz4`，LZ4 文件会流式解压，无需手动预解压。
 
 ### 4.1 summarize — 算法模式识别
 
@@ -337,7 +386,7 @@ xfq stack trace.log --no-collapse   # 不折叠重复调用
 
 ### 4.3 grep — 结构化查询
 
-按 PC 范围、指令类型、模块、寄存器值过滤 trace 行。
+按 PC 范围、指令类型、模块、寄存器值过滤 trace 行。寄存器条件支持等值、大小比较和闭区间范围。
 
 ```bash
 # 按指令类型过滤
@@ -352,11 +401,50 @@ xfq grep trace.log --module libsgmain
 # 寄存器值过滤
 xfq grep trace.log --reg x0=0x1234
 
+# 寄存器比较
+xfq grep trace.log --reg 'x0>=0x100'
+
+# 寄存器范围，包含边界
+xfq grep trace.log --reg x0:0x100-0x200
+
 # 组合过滤，最多显示 10 条
 xfq grep trace.log --opcode str --module libc --max 10
 ```
 
-### 4.4 slice — 切片导出
+支持的寄存器条件格式：
+
+| 格式 | 说明 |
+|---|---|
+| `x0=0x1234` | 执行前或执行后等于目标值 |
+| `x0!=0` | 不等于目标值 |
+| `x0>0x100` / `x0>=0x100` | 大于 / 大于等于 |
+| `x0<0x200` / `x0<=0x200` | 小于 / 小于等于 |
+| `x0:0x100-0x200` | 闭区间范围 |
+
+### 4.4 search-seq — 指令序列搜索
+
+按结构化指令模式匹配一组指令，适合在大 trace 中定位“调用前后”或“参数装载 + 调用”的模式。模式用分号分隔，单条指令支持 `*` 和 `?` wildcard。
+
+```bash
+# 相邻匹配：ldr 后紧跟 bl strcmp
+xfq search-seq trace.log --seq "ldr x0, *; bl strcmp"
+
+# 非相邻匹配：允许中间隔若干条指令
+xfq search-seq trace.log --seq "ldr x0, *; bl strcmp" --non-adjacent
+
+# 非相邻匹配时限制最大间隔
+xfq search-seq trace.log --seq "ldr x0, *; bl strcmp" --non-adjacent --max-gap 3
+
+# 限定模块和 PC 范围，并输出前后文
+xfq search-seq trace.log --seq "mov x0, *; bl *strcmp*" --module libsgmain --pc-range 0x55000-0x56000 --context 2
+
+# JSON 输出，便于脚本或 MCP 消费
+xfq search-seq trace.log --seq "nop" --max 5 --json
+```
+
+返回结果包含 `start_line`、`end_line`、`sequence`、`context_before`、`context_after` 等字段。`--max` 会限制最终匹配组数，包含 EOF 前尚未补足后文的 pending 匹配。
+
+### 4.5 slice — 切片导出
 
 从大 trace 中裁剪指定范围，生成新文件。
 
@@ -369,14 +457,33 @@ xfq slice trace.log --pc-range 0x55000-0x56000 --output snippet.log
 
 # 限制最大行数
 xfq slice trace.log --line-start 1 --line-end 1000 --max 200 --output snippet.log
+
+# JSON 输出，查看是否因为 --max 截断
+xfq slice trace.log --max 200 --output snippet.log --json
 ```
 
-### 4.5 stats — 调用/指令统计
+`--max` 达到上限后会立即停止读取输入，避免对 GB 级 trace 做无意义扫描。JSON 输出中：
+
+| 字段 | 说明 |
+|---|---|
+| `total_lines` | 实际已读取行数 |
+| `total_lines_exact` | `false` 表示没有继续读取剩余行，`total_lines` 不是全文件精确总行数 |
+| `truncated` | `true` 表示输出因为 `--max` 被截断 |
+| `written_lines` | 实际写入输出文件的行数 |
+| `skipped_lines` | 因 PC 范围等过滤条件跳过的行数 |
+
+### 4.6 stats — 调用/指令统计
 
 统计函数调用次数和指令分布。
 
 ```bash
 xfq stats trace.log
+
+# 附加解析诊断，定位无法解析的日志行
+xfq stats trace.log --parse-stats
+
+# JSON 输出
+xfq stats trace.log --parse-stats --json
 ```
 
 输出：
@@ -394,7 +501,7 @@ xfq stats trace.log
   ldrb                    1231
 ```
 
-### 4.6 regdiff — 寄存器变化热力图
+### 4.7 regdiff — 寄存器变化热力图
 
 统计每个寄存器的变化次数、首次/末次值，快速发现关键寄存器。
 
@@ -414,9 +521,9 @@ x8     595      0x74f6278000             0x42fad59f84b95c4d
 x0     7        0x74f817a178             0x7645456a10
 ```
 
-### 4.7 mempat — 内存访问模式
+### 4.8 mempat — 内存访问模式
 
-检测连续内存写入模式（memcpy / memset 特征）。
+检测连续内存读写模式（memcpy / memset / 顺序读取特征）。
 
 ```bash
 xfq mempat trace.log
@@ -426,9 +533,10 @@ xfq mempat trace.log
 
 ```
 sequential_write     L1-L5    stride=8 count=5
+sequential_read      L9-L14   stride=4 count=6
 ```
 
-### 4.8 branch — 分支命中率分析
+### 4.9 branch — 分支命中率分析
 
 统计条件跳转指令的跳转/不跳转次数，识别死代码和关键决策点。
 
@@ -445,7 +553,13 @@ libsgmainso          0x55110   b.ne #-0x4c  156    0     100.0%
 libsgmainso          0x55084   cbz w1,#0x90 15     0     100.0%
 ```
 
-### 4.9 taint — 污点分析
+说明：
+
+- AArch64 trace 默认按 4 字节指令估算 fallthrough，JSON 中会标注 `arch_assumption: aarch64_fixed_4_bytes`。
+- 如果日志模块名包含 Thumb 标记或可从地址推断 Thumb，会标注 `thumb_inferred_2_bytes`。
+- `br`、`blr` 等间接跳转会统计为 `type=indirect`，不强行推断命中率。
+
+### 4.10 taint — 污点分析
 
 标记一个或多个输入（寄存器/内存地址），自动跟踪其在 trace 中的传播路径，判断返回值是否受其影响。用于快速确定参数是否参与了签名、加密或校验计算。
 
@@ -469,6 +583,12 @@ xfq taint trace.log --taint x2 --max-prop 5
 xfq taint trace.log --taint x2 --json
 ```
 
+注意：
+
+- 内存污点按地址粒度记录，不模拟完整字节级别 CPU 语义；`strb` 等部分写会在输出 warning 中说明。
+- `--taint-mem` 使用区间摘要存储，不会为大范围内的每个地址初始化一个字典项。
+- `w0` 等 32 位寄存器写入会清理对应 `x0` 的旧污点，避免高位污点误留。
+
 输出：
 ```
 污点分析结果 — 9,703 条指令
@@ -487,6 +607,62 @@ xfq taint trace.log --taint x2 --json
 ```
 
 **基本原理：** 扫描 trace 中的每条指令，维护寄存器/内存地址到污点标签的映射。`str` 将污点写入内存，`ldr` 从内存读回，`add/eor/mov` 等 ALU 指令将源操作数的污点传递给目标寄存器。不依赖指令模拟，利用 trace 中已有的寄存器值进行传播，准确率在栈内存场景下可达 95% 以上。
+
+### 4.11 index / query — SQLite 索引查询
+
+当同一个大 trace 需要反复查询时，可以先导入 SQLite 索引库。原始 `.log` / `.log.lz4` 仍然保留，`trace.db` 只是可删除重建的查询缓存。
+
+```bash
+# 建立索引，默认不覆盖已有 db
+xfq index trace.log --db trace.db
+
+# 覆盖重建
+xfq index trace.log.lz4 --db trace.db --replace
+
+# JSON 输出导入统计
+xfq index trace.log --db trace.db --json
+```
+
+索引库核心表：
+
+| 表 | 说明 |
+|---|---|
+| `trace_file` | 原始 trace 文件路径、大小、hash、导入统计 |
+| `insn` | 指令主表，包含行号、模块、地址、opcode、操作数、原始行 |
+| `reg_access` | 寄存器 before/after 值和 `changed` 写入标记 |
+| `mem_access` | load/store 的读写方向、解析出的内存地址和大小 |
+| `parse_error` | 非指令行或解析失败行，便于排查日志格式漂移 |
+
+常用查询：
+
+```bash
+# 查谁写入了 x0
+xfq query-reg trace.db --write x0
+
+# 查 bl 指令
+xfq query-op trace.db --opcode bl
+
+# 限定模块
+xfq query-op trace.db --opcode str --module libsgmain
+
+# 查相邻指令序列
+xfq query-seq trace.db --seq "ldr x0, *; bl strcmp" --context 2
+
+# 执行只读 SQL
+xfq query trace.db --sql "SELECT line_no, module, insn FROM insn WHERE opcode='bl' LIMIT 20"
+```
+
+`query` 只允许单条 `SELECT` / `WITH` 查询，并开启 SQLite `query_only`，避免误删索引库。查寄存器时不要用 `LIKE '%x0%'`，应使用 `reg_access`：
+
+```sql
+SELECT i.*
+FROM reg_access r
+JOIN insn i ON i.id = r.insn_id
+WHERE r.reg = 'x0'
+  AND r.changed = 1;
+```
+
+相比直接 `grep/search-seq`，索引查询的优势是“导入一次，多次复用解析结果”。如果只查一次小日志，直接用原有命令更简单；如果是几百 MB 或 GB 级日志反复探索，优先建索引。
 
 ---
 
@@ -745,6 +921,17 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 | `xfqtrace_list_logs` | 列出本地日志 |
 | `xfqtrace_preview_log` | 预览日志内容 |
 | `xfqtrace_logcat_command` | 生成 logcat 监控命令 |
+| `xfqtrace_summarize` | 智能摘要和算法模式识别 |
+| `xfqtrace_stack` | 重建调用栈 |
+| `xfqtrace_grep` | 结构化查询 trace 行 |
+| `xfqtrace_search_sequence` | 指令序列搜索 |
+| `xfqtrace_stats` | 调用/指令统计 |
+| `xfqtrace_regdiff` | 寄存器变化统计 |
+| `xfqtrace_mempat` | 内存访问模式检测 |
+| `xfqtrace_branch` | 分支命中率分析 |
+| `xfqtrace_taint` | 污点传播分析 |
+
+分析类 MCP 工具支持直接传 `text`、传 `input` 文件路径，或传 `package` 自动解析本地日志；当同一包有多个 run 时可用 `run_id` 指定目录。
 
 ---
 

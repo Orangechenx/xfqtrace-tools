@@ -150,6 +150,11 @@ class FridaDevice:
             paths.append(p)
         return paths
 
+    def is_package_installed(self, package: str) -> bool:
+        """检查目标包是否已安装，避免后续 root shell 误创建私有目录。"""
+        r = self._adb("shell", "pm", "path", package, timeout=10)
+        return r.returncode == 0 and "package:" in r.stdout
+
     @staticmethod
     def _infer_max_traces(script_text: str) -> int | None:
         m = re.search(r"stop_condition\s*:\s*\{\s*max_traces\s*:\s*(-?\d+)", script_text)
@@ -231,14 +236,15 @@ class FridaDevice:
 
         # 等待 trace_done 或超时
         deadline = time.monotonic() + timeout
+        trace_scan_index = 0
         while time.monotonic() < deadline:
-            for line in frida_stdout[-50:]:
-                if "trace_done" in line:
-                    trace_count += 1
-                    print(f"[*] trace #{trace_count} done")
-                    if expected_traces and trace_count >= expected_traces:
-                        done = True
-                        break
+            new_count, trace_scan_index = self._scan_trace_done_lines(frida_stdout, trace_scan_index)
+            for _ in range(new_count):
+                trace_count += 1
+                print(f"[*] trace #{trace_count} done")
+                if expected_traces and trace_count >= expected_traces:
+                    done = True
+                    break
             if done:
                 break
             time.sleep(0.5)
@@ -256,6 +262,7 @@ class FridaDevice:
                 pass
 
         print(f"[*] frida 退出 (code={proc.returncode}), traces={trace_count}")
+        target_crashed = self._detect_target_crash(stdout_all)
         return {
             "package": package,
             "trace_count": trace_count,
@@ -263,8 +270,26 @@ class FridaDevice:
             "done": done,
             "frida_exit_code": proc.returncode,
             "frida_stdout": stdout_all,
+            "target_crashed": target_crashed,
             "duration_sec": int(time.monotonic() - start_ts),
         }
+
+    @staticmethod
+    def _detect_target_crash(output: str) -> bool:
+        crash_markers = (
+            "Process crashed:",
+            "SIGABRT",
+            "SIGSEGV",
+            "signal 6",
+            "signal 11",
+        )
+        return any(marker in output for marker in crash_markers)
+
+    @staticmethod
+    def _scan_trace_done_lines(lines: list[str], start_index: int) -> tuple[int, int]:
+        new_lines = lines[start_index:]
+        count = sum(1 for line in new_lines if "trace_done" in line)
+        return count, len(lines)
 
     def _merge_bypass(self, hook_script: Path, bypass: list[str]) -> Path:
         """将 bypass 脚本与主 hook 脚本合并为一个临时 agent 文件。

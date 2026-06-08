@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -12,6 +13,7 @@ from mcp.server import Server
 from mcp.types import CallToolResult, JSONRPCMessage, TextContent, Tool
 from mcp.shared.message import SessionMessage
 
+from .config import package_logs_dir
 from .core import XfqtraceCore, XfqtraceError
 
 
@@ -120,6 +122,7 @@ class XfqtraceMcpServer:
     def __init__(self, core: XfqtraceCore) -> None:
         self.core = core
         self.server = Server("xfqtrace-mcp")
+        self._analysis_source_cache: dict[tuple[str, str, int], list[Path]] = {}
 
     def serve(self) -> None:
         self._register_tools()
@@ -235,6 +238,95 @@ class XfqtraceMcpServer:
                     },
                 },
             ),
+            Tool(
+                name="xfqtrace_summarize",
+                description="分析 trace 摘要，识别 XOR 循环、连续内存访问等模式。",
+                inputSchema=self._analysis_schema(),
+            ),
+            Tool(
+                name="xfqtrace_stack",
+                description="基于 hook call/ret 记录重建调用栈。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "max_depth": {"type": "integer", "default": 20},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_grep",
+                description="结构化查询 trace 指令，支持 PC 范围、opcode、module 和寄存器值过滤。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "pc_range": {"type": "string", "description": "0xstart-0xend"},
+                        "opcode": {"type": "string"},
+                        "module": {"type": "string"},
+                        "reg": {"type": "string", "description": "reg=value，如 x0=0x1234"},
+                        "max_results": {"type": "integer", "default": 50},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_search_sequence",
+                description="搜索指令序列，seq 使用分号分隔，支持相邻/非相邻模式和 *、? wildcard。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "seq": {"type": "string", "description": "如: ldr x0, *; bl strcmp"},
+                        "pc_range": {"type": "string", "description": "0xstart-0xend"},
+                        "module": {"type": "string"},
+                        "opcode": {"type": "string"},
+                        "context": {"type": "integer", "default": 0},
+                        "adjacent": {"type": "boolean", "default": True},
+                        "max_gap": {"type": "integer", "default": 0, "description": "非相邻模式下两条匹配指令之间允许跨过的最大指令数，0 表示不限制"},
+                        "max_results": {"type": "integer", "default": 50},
+                    },
+                    "required": ["seq"],
+                },
+            ),
+            Tool(
+                name="xfqtrace_stats",
+                description="统计 trace 中的 hook 调用次数和指令 opcode 分布。",
+                inputSchema=self._analysis_schema(),
+            ),
+            Tool(
+                name="xfqtrace_regdiff",
+                description="统计寄存器变化次数、首次/末次/最大/最小值。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "regs": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_mempat",
+                description="检测连续内存读写模式。",
+                inputSchema=self._analysis_schema(),
+            ),
+            Tool(
+                name="xfqtrace_branch",
+                description="分析条件分支命中率，并统计 br/blr 间接跳转。",
+                inputSchema=self._analysis_schema(),
+            ),
+            Tool(
+                name="xfqtrace_taint",
+                description="执行轻量污点分析，标记寄存器或内存范围并跟踪传播。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "taint_regs": {"type": "array", "items": {"type": "string"}},
+                        "taint_mem_range": {"type": "string", "description": "0xstart-0xend"},
+                        "summary": {"type": "boolean", "default": False},
+                    },
+                },
+            ),
         ]
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
@@ -262,6 +354,75 @@ class XfqtraceMcpServer:
                     clear=bool(arguments.get("clear", False)),
                     tag=str(arguments.get("tag", "xfQTrace:D")),
                 )
+            elif name == "xfqtrace_summarize":
+                from .analyzer import summarize
+                result = summarize(**self._analysis_source(arguments))
+            elif name == "xfqtrace_stack":
+                from .analyzer import build_stack
+                result = {
+                    "calls": build_stack(
+                        **self._analysis_source(arguments),
+                        max_depth=int(arguments.get("max_depth", 20)),
+                    )
+                }
+                result["count"] = len(result["calls"])
+            elif name == "xfqtrace_grep":
+                from .analyzer import grep, parse_reg_condition
+                reg_arg = arguments.get("reg")
+                result = {
+                    "results": grep(
+                        **self._analysis_source(arguments),
+                        pc_range=self._parse_range(arguments.get("pc_range")),
+                        opcode=arguments.get("opcode"),
+                        module=arguments.get("module"),
+                        reg_filter=self._parse_reg_filter(reg_arg) if isinstance(reg_arg, dict) else None,
+                        reg_conditions=[parse_reg_condition(str(reg_arg))] if reg_arg and not isinstance(reg_arg, dict) else None,
+                        max_results=int(arguments.get("max_results", 50)),
+                    )
+                }
+                result["matches"] = len(result["results"])
+            elif name == "xfqtrace_search_sequence":
+                from .analyzer import search_sequence
+                result = {
+                    "results": search_sequence(
+                        **self._analysis_source(arguments),
+                        pattern=str(arguments.get("seq", "")),
+                        pc_range=self._parse_range(arguments.get("pc_range")),
+                        module=arguments.get("module"),
+                        opcode=arguments.get("opcode"),
+                        context=int(arguments.get("context", 0)),
+                        adjacent=bool(arguments.get("adjacent", True)),
+                        max_gap=int(arguments.get("max_gap", 0)),
+                        max_results=int(arguments.get("max_results", 50)),
+                    )
+                }
+                result["matches"] = len(result["results"])
+            elif name == "xfqtrace_stats":
+                from .analyzer import stats
+                result = stats(**self._analysis_source(arguments))
+            elif name == "xfqtrace_regdiff":
+                from .analyzer import regdiff
+                regs = arguments.get("regs")
+                result = {
+                    "registers": regdiff(
+                        **self._analysis_source(arguments),
+                        target_regs=list(regs) if isinstance(regs, list) else None,
+                    )
+                }
+            elif name == "xfqtrace_mempat":
+                from .analyzer import mempat
+                result = {"patterns": mempat(**self._analysis_source(arguments))}
+            elif name == "xfqtrace_branch":
+                from .analyzer import branch_analysis
+                result = {"branches": branch_analysis(**self._analysis_source(arguments))}
+            elif name == "xfqtrace_taint":
+                from .analyzer import taint_analysis
+                result = taint_analysis(
+                    **self._analysis_source(arguments),
+                    taint_regs=self._string_list(arguments.get("taint_regs")),
+                    taint_mem_range=self._parse_range(arguments.get("taint_mem_range")),
+                    summary=bool(arguments.get("summary", False)),
+                )
             else:
                 raise XfqtraceError(f"未知工具: {name}")
 
@@ -273,6 +434,145 @@ class XfqtraceMcpServer:
                 content=[TextContent(type="text", text=str(e))],
                 isError=True,
             )
+        except Exception as e:
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"执行失败: {e}")],
+                isError=True,
+            )
+
+    @staticmethod
+    def _analysis_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "trace 文件路径或包名"},
+                "package": {"type": "string", "description": "目标包名，未传 input 时使用"},
+                "text": {"type": "string", "description": "直接传入 trace 文本"},
+                "log_dir": {"type": "string", "description": "日志目录"},
+                "run_id": {"type": "string", "description": "logs 下的运行编号"},
+                "relative_path": {"type": "string", "description": "run 目录内的 trace 相对路径"},
+            },
+        }
+
+    def _analysis_source(self, a: dict[str, Any]) -> dict[str, Any]:
+        text = a.get("text")
+        if text is not None:
+            return {"text": str(text)}
+
+        source = str(a.get("input") or a.get("package") or "").strip()
+        if not source:
+            raise XfqtraceError("必须提供 input/package 或 text")
+
+        path = Path(source).expanduser()
+        if path.exists():
+            if path.is_dir():
+                raise XfqtraceError(f"路径是目录，不是 trace 文件: {source}")
+            return {"paths": [path.resolve()]}
+
+        log_dir = a.get("log_dir")
+        resolved_log_dir = Path(str(log_dir)).expanduser() if log_dir else package_logs_dir(self.core.tool_root, source)
+        run_id = str(a.get("run_id") or "").strip()
+        if run_id:
+            return {"paths": [self._resolve_run_trace(resolved_log_dir, run_id, a.get("relative_path"))]}
+        return {"paths": self._resolve_package_trace_cached(source, resolved_log_dir)}
+
+    def _resolve_package_trace_cached(self, package: str, log_dir: Path) -> list[Path]:
+        """缓存包名到最新 trace 的解析结果，避免 MCP 连续查询重复扫描目录。"""
+        resolved_log_dir = log_dir.resolve()
+        cache_token = self._dir_mtime_ns(resolved_log_dir)
+        key = (package, str(resolved_log_dir), cache_token)
+        cached = self._analysis_source_cache.get(key)
+        if cached is not None:
+            return list(cached)
+
+        stale_prefix = (package, str(resolved_log_dir))
+        for stale_key in list(self._analysis_source_cache):
+            if stale_key[:2] == stale_prefix:
+                del self._analysis_source_cache[stale_key]
+
+        from .analyzer import resolve_trace_file
+        paths = resolve_trace_file(package, resolved_log_dir)
+        self._analysis_source_cache[key] = list(paths)
+        return list(paths)
+
+    @staticmethod
+    def _dir_mtime_ns(path: Path) -> int:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return -1
+
+    @staticmethod
+    def _resolve_run_trace(log_dir: Path, run_id: str, relative_path: Any = None) -> Path:
+        run_dir = (log_dir / run_id).resolve()
+        if not run_dir.exists() or not run_dir.is_dir():
+            raise XfqtraceError(f"run_id 不存在: {run_id}")
+
+        if relative_path:
+            target = (run_dir / str(relative_path)).resolve()
+            if target != run_dir and run_dir not in target.parents:
+                raise XfqtraceError(f"relative_path 越界: {relative_path}")
+            if not target.exists() or not target.is_file():
+                raise XfqtraceError(f"trace 文件不存在: {relative_path}")
+            return target
+
+        files = sorted(
+            [f for f in run_dir.rglob("*") if f.is_file() and not f.name.endswith(".lz4") and f.stat().st_size > 0],
+            key=lambda x: x.stat().st_size,
+            reverse=True,
+        )
+        if files:
+            return files[0]
+
+        lz4_files = sorted(
+            [f for f in run_dir.rglob("*.lz4") if f.is_file() and f.stat().st_size > 0],
+            key=lambda x: x.stat().st_size,
+            reverse=True,
+        )
+        if lz4_files:
+            return lz4_files[0]
+
+        raise XfqtraceError(f"run 目录下无可用 trace 文件: {run_dir}")
+
+    @staticmethod
+    def _parse_range(value: Any) -> tuple[int, int] | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            start = int(value[0], 0) if isinstance(value[0], str) else int(value[0])
+            end = int(value[1], 0) if isinstance(value[1], str) else int(value[1])
+        else:
+            parts = str(value).split("-")
+            if len(parts) != 2:
+                raise XfqtraceError("地址范围格式错误，应为 0xstart-0xend")
+            start = int(parts[0].strip(), 0)
+            end = int(parts[1].strip(), 0)
+        if start > end:
+            raise XfqtraceError(f"地址范围起始地址不能大于结束地址: {hex(start)} > {hex(end)}")
+        return start, end
+
+    @staticmethod
+    def _parse_reg_filter(value: Any) -> dict[str, int] | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, dict):
+            return {
+                str(reg): int(raw, 0) if isinstance(raw, str) else int(raw)
+                for reg, raw in value.items()
+            }
+        raw = str(value)
+        if "=" not in raw:
+            raise XfqtraceError("reg 格式错误，应为 reg=value 如 x0=0x1234")
+        reg, val = raw.split("=", 1)
+        return {reg.strip(): int(val.strip(), 0)}
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str] | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, list):
+            return [str(v) for v in value if str(v).strip()]
+        return [v.strip() for v in str(value).split(",") if v.strip()]
 
     @staticmethod
     def _extract_gen_args(a: dict[str, Any]) -> dict[str, Any]:

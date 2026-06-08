@@ -51,13 +51,12 @@ def resolve_tool_root(explicit: str | Path | None = None) -> Path:
 
 
 def _has_minimal_assets(tool_root: Path) -> bool:
-    """检查目录是否包含最简资产（默认模板 或 至少一个案例目录）。"""
-    return (
-        (tool_root / DEFAULT_TEMPLATE).exists()
-        or any(
-            p.is_dir() and "." in p.name
-            for p in tool_root.iterdir()
-        )
+    """检查目录是否包含最简资产（默认模板或至少一个带模板的案例目录）。"""
+    if (tool_root / DEFAULT_TEMPLATE).exists():
+        return True
+    return any(
+        p.is_dir() and "." in p.name and (p / DEFAULT_TEMPLATE).exists()
+        for p in tool_root.iterdir()
     )
 
 

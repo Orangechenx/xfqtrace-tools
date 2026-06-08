@@ -330,8 +330,10 @@ class XfqtraceCore:
         execute: bool = False,
     ) -> dict[str, Any]:
         pkg = validate_package(package)
+        script_path = Path(hook_script).expanduser().resolve() if hook_script else self.device.resolve_hook_script(pkg)
+        if hook_script and not script_path.exists():
+            raise XfqtraceError(f"hook 脚本不存在: {script_path}")
         if not execute:
-            script_path = Path(hook_script).resolve() if hook_script else self.device.resolve_hook_script(pkg)
             return {
                 "executed": False,
                 "plan": {
@@ -344,18 +346,23 @@ class XfqtraceCore:
                 },
             }
         self.device.ensure_ready()
+        if not self.device.is_package_installed(pkg):
+            raise XfqtraceError(f"目标包未安装: {pkg}")
         self.device.push_so(pkg, so_path=so_path)
         trace_result = self.device.run_trace(
             package=pkg,
-            hook_script=hook_script,
+            hook_script=script_path,
             attach=attach,
             bypass=bypass,
             timeout=timeout,
             so_path=so_path,
         )
         pull_result = self.device.pull_logs(pkg)
+        ok, errors = _evaluate_trace_result(trace_result)
         return {
             "executed": True,
+            "ok": ok,
+            "errors": errors,
             "trace": trace_result,
             "pull": pull_result,
         }
@@ -476,3 +483,22 @@ def _file_info(path: Path) -> dict[str, Any]:
         info["is_file"] = path.is_file()
         info["is_dir"] = path.is_dir()
     return info
+
+
+def _evaluate_trace_result(trace_result: dict[str, Any]) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    exit_code = trace_result.get("frida_exit_code")
+    if exit_code not in (0, None):
+        errors.append(f"frida 退出码异常: {exit_code}")
+
+    expected = trace_result.get("expected")
+    trace_count = int(trace_result.get("trace_count") or 0)
+    if expected and trace_count < int(expected):
+        errors.append("trace 未达到预期次数")
+    elif expected and not trace_result.get("done", False):
+        errors.append("trace 未正常完成")
+
+    if trace_result.get("target_crashed"):
+        errors.append("目标进程发生崩溃")
+
+    return not errors, errors

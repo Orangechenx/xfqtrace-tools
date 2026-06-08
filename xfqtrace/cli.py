@@ -43,6 +43,25 @@ def print_json(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def is_failed_run_result(result: dict) -> bool:
+    return result.get("executed") is True and result.get("ok") is False
+
+
+def parse_pc_range(value: str) -> tuple[int, int]:
+    """解析 0xstart-0xend 形式的 PC 范围。"""
+    m = re.match(
+        r"^\s*(?P<start>0[xX][0-9a-fA-F]+|\d+)\s*-\s*(?P<end>0[xX][0-9a-fA-F]+|\d+)\s*$",
+        value,
+    )
+    if not m:
+        raise ValueError("--pc-range 格式错误，应为 0xstart-0xend")
+    start = int(m.group("start"), 0)
+    end = int(m.group("end"), 0)
+    if start > end:
+        raise ValueError(f"--pc-range 起始地址不能大于结束地址: {hex(start)} > {hex(end)}")
+    return start, end
+
+
 # ── doctor ──────────────────────────────────────────────────────
 
 @app.command()
@@ -150,9 +169,13 @@ def run(
             execute=execute,
         )
         print_json(result)
+        if is_failed_run_result(result):
+            raise typer.Exit(1)
     except XfqtraceError as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except Exception as e:
         print(f"运行异常: {e}", file=sys.stderr)
         raise typer.Exit(1)
@@ -346,7 +369,7 @@ def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: s
         tr = resolve_tool_root(tool_root)
         base = Path(log_dir) if log_dir else tr
         candidates = sorted(
-            [d for d in base.rglob("*.log*") if d.is_file() and not d.name.endswith(".lz4")],
+            [d for d in base.rglob("*.log*") if d.is_file()],
             key=lambda x: x.stat().st_mtime, reverse=True,
         )
         if candidates:
@@ -354,7 +377,10 @@ def _resolve_path(package_or_path: str | None, tool_root: str | None, log_dir: s
         raise FileNotFoundError("未找到 trace 日志文件")
 
     from .analyzer import resolve_trace_file
-    return resolve_trace_file(pkg, log_dir)
+    try:
+        return resolve_trace_file(pkg, log_dir)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"{exc}\n可先查看已有日志: xfq list-logs -p {pkg}") from exc
 
 
 def _add_json_flag() -> bool:
@@ -445,35 +471,27 @@ def grep(
 ):
     """结构化查询 — 按条件过滤 trace 指令。"""
     try:
-        from .analyzer import grep as grep_func
+        from .analyzer import grep as grep_func, parse_reg_condition
         paths = _resolve_path(input, tool_root, log_dir)
 
         pc_range_tuple = None
         if pc_range:
             try:
-                parts = pc_range.split("-")
-                if len(parts) == 2:
-                    pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
-                else:
-                    raise ValueError
-            except ValueError:
-                print("错误: --pc-range 格式错误，应为 0xstart-0xend", file=sys.stderr)
+                pc_range_tuple = parse_pc_range(pc_range)
+            except ValueError as e:
+                print(f"错误: {e}", file=sys.stderr)
                 raise typer.Exit(1)
 
-        reg_filter = None
+        reg_conditions = None
         if reg:
             try:
-                if "=" in reg:
-                    r, v = reg.split("=", 1)
-                    reg_filter = {r: int(v, 16) if v.startswith("0x") else int(v)}
-                else:
-                    print(f"警告: --reg 缺少 =，忽略过滤 (正确格式: x0=0x1234)", file=sys.stderr)
-            except ValueError:
-                print("错误: --reg 格式错误，应为 reg=value 如 x0=0x1234", file=sys.stderr)
+                reg_conditions = [parse_reg_condition(reg)]
+            except ValueError as e:
+                print(f"错误: {e}", file=sys.stderr)
                 raise typer.Exit(1)
 
         results = grep_func(paths=paths, pc_range=pc_range_tuple, opcode=opcode,
-                           module=module, reg_filter=reg_filter, max_results=max_results)
+                           module=module, reg_conditions=reg_conditions, max_results=max_results)
         if json_output:
             print_json({"matches": len(results), "results": results})
             return
@@ -483,6 +501,66 @@ def grep(
         for r in results:
             print(f"  L{r['line_no']:>6} [{r['module']}] {r['address']}!{r['offset']} {r['insn']}")
         print(f"\n匹配 {len(results)} 行")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── search-seq ─────────────────────────────────────────────────
+
+@app.command(name="search-seq")
+def search_seq(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    seq: str = typer.Option(..., "--seq", help="指令序列，分号分隔，支持 * 和 ? wildcard"),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    pc_range: Optional[str] = typer.Option(None, "--pc-range", help="PC 范围 0xstart-0xend"),
+    module: Optional[str] = typer.Option(None, "--module", help="模块名过滤"),
+    opcode: Optional[str] = typer.Option(None, "--opcode", help="要求匹配序列中包含该 opcode 文本"),
+    context: int = typer.Option(0, "--context", help="匹配前后额外输出的指令条数"),
+    adjacent: bool = typer.Option(True, "--adjacent/--non-adjacent", help="是否要求序列指令相邻"),
+    max_gap: int = typer.Option(0, "--max-gap", help="非相邻模式下两条匹配指令之间允许跨过的最大指令数，0 表示不限制"),
+    max_results: int = typer.Option(50, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """指令序列搜索 — 例如 --seq "ldr x0, *; bl strcmp"。"""
+    try:
+        from .analyzer import search_sequence
+        paths = _resolve_path(input, tool_root, log_dir)
+        pc_range_tuple = None
+        if pc_range:
+            try:
+                pc_range_tuple = parse_pc_range(pc_range)
+            except ValueError as e:
+                print(f"错误: {e}", file=sys.stderr)
+                raise typer.Exit(1)
+        results = search_sequence(
+            paths=paths,
+            pattern=seq,
+            pc_range=pc_range_tuple,
+            module=module,
+            opcode=opcode,
+            context=context,
+            adjacent=adjacent,
+            max_gap=max_gap,
+            max_results=max_results,
+        )
+        if json_output:
+            print_json({"matches": len(results), "results": results})
+            return
+        if not results:
+            print("未匹配到指令序列")
+            return
+        for r in results:
+            first = r["sequence"][0]
+            last = r["sequence"][-1]
+            print(f"  L{r['start_line']:>6}-L{r['end_line']:<6} {first['address']} -> {last['address']}")
+            for item in r["sequence"]:
+                print(f"    [{item['module']}] {item['address']}!{item['offset']} {item['insn']}")
+        print(f"\n匹配 {len(results)} 组")
+    except ValueError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)
@@ -510,13 +588,9 @@ def slice(
         pc_range_tuple = None
         if pc_range:
             try:
-                parts = pc_range.split("-")
-                if len(parts) == 2:
-                    pc_range_tuple = (int(parts[0], 16), int(parts[1], 16))
-                else:
-                    raise ValueError
-            except ValueError:
-                print("错误: --pc-range 格式错误，应为 0xstart-0xend", file=sys.stderr)
+                pc_range_tuple = parse_pc_range(pc_range)
+            except ValueError as e:
+                print(f"错误: {e}", file=sys.stderr)
                 raise typer.Exit(1)
 
         line_range = None
@@ -548,18 +622,28 @@ def stats(
     input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
     tool_root: Optional[str] = typer.Option(None, "--tool-root"),
     log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    parse_stats_output: bool = typer.Option(False, "--parse-stats", help="附加 trace 解析成功/失败统计"),
     json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """API 调用统计 — 统计函数调用次数和指令分布。"""
     try:
-        from .analyzer import stats as stats_func
+        from .analyzer import parse_trace_stats, stats as stats_func
         paths = _resolve_path(input, tool_root, log_dir)
         result = stats_func(paths=paths)
+        if parse_stats_output:
+            result["parse_stats"] = parse_trace_stats(paths=paths)
         if json_output:
             print_json(result)
             return
         print(f"指令总数: {result['total_instructions']:,}")
         print(f"函数调用: {result['total_calls']:,}")
+        if parse_stats_output and result.get("parse_stats"):
+            ps = result["parse_stats"]
+            print(
+                f"解析统计: 总行 {ps['total_lines']:,}, "
+                f"指令 {ps['instruction_lines']:,}, "
+                f"未解析 {ps['unparsed_lines']:,}"
+            )
         if result.get("calls"):
             print(f"\n调用分布 (Top {min(10, len(result['calls']))}):")
             for c in result["calls"][:10]:
@@ -738,6 +822,137 @@ def taint(
 
         print(format_taint_result(result, max_prop=max_prop))
 
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── index / query ───────────────────────────────────────────────
+
+@app.command(name="index")
+def index_trace_cmd(
+    input: str = typer.Argument(..., help="trace 日志文件路径，支持 .log / .log.lz4"),
+    db: Optional[str] = typer.Option(None, "--db", help="输出 SQLite 索引库路径，默认与 trace 同目录同名 .db"),
+    replace: bool = typer.Option(False, "--replace", help="覆盖已有索引库"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """将 trace 日志流式导入 SQLite 索引库。"""
+    try:
+        from .trace_index import index_trace
+        result = index_trace(input, db_path=db, replace=replace)
+        if json_output:
+            print_json(result)
+            return
+        print(f"索引完成: {result['parsed_count']:,}/{result['line_count']:,} 行 -> {result['db']}")
+        if result["parse_failed_count"]:
+            print(f"  解析失败: {result['parse_failed_count']:,} 行，可查询 parse_error 表")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="query")
+def query_cmd(
+    db: str = typer.Argument(..., help="SQLite 索引库路径"),
+    sql: str = typer.Option(..., "--sql", help="只读 SELECT SQL"),
+    limit: int = typer.Option(200, "--limit", help="未显式 LIMIT 时自动追加的最大行数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """执行只读 SQL 查询。"""
+    try:
+        from .trace_index import query_sql
+        rows = query_sql(db, sql, limit=limit)
+        if json_output:
+            print_json({"matches": len(rows), "rows": rows})
+            return
+        if not rows:
+            print("未匹配到结果")
+            return
+        for row in rows:
+            print_json(row)
+        print(f"\n匹配 {len(rows)} 行")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="query-reg")
+def query_reg_cmd(
+    db: str = typer.Argument(..., help="SQLite 索引库路径"),
+    write: Optional[str] = typer.Option(None, "--write", help="查询写入/变化的寄存器，如 x0"),
+    reg: Optional[str] = typer.Option(None, "--reg", help="查询未变化访问的寄存器"),
+    max_results: int = typer.Option(50, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """按寄存器访问查询指令。"""
+    try:
+        from .trace_index import query_reg
+        results = query_reg(db, write=write, reg=reg, limit=max_results)
+        if json_output:
+            print_json({"matches": len(results), "results": results})
+            return
+        if not results:
+            print("未匹配到结果")
+            return
+        for r in results:
+            print(f"  L{r['line_no']:>6} [{r['module']}] {hex(r['address'])}!{hex(r['offset'])} {r['insn']}")
+        print(f"\n匹配 {len(results)} 行")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="query-op")
+def query_op_cmd(
+    db: str = typer.Argument(..., help="SQLite 索引库路径"),
+    opcode: str = typer.Option(..., "--opcode", help="opcode，如 bl / str / ldr"),
+    module: Optional[str] = typer.Option(None, "--module", help="模块名过滤"),
+    max_results: int = typer.Option(50, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """按 opcode 和模块查询指令。"""
+    try:
+        from .trace_index import query_op
+        results = query_op(db, opcode=opcode, module=module, limit=max_results)
+        if json_output:
+            print_json({"matches": len(results), "results": results})
+            return
+        if not results:
+            print("未匹配到结果")
+            return
+        for r in results:
+            print(f"  L{r['line_no']:>6} [{r['module']}] {hex(r['address'])}!{hex(r['offset'])} {r['insn']}")
+        print(f"\n匹配 {len(results)} 行")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="query-seq")
+def query_seq_cmd(
+    db: str = typer.Argument(..., help="SQLite 索引库路径"),
+    seq: str = typer.Option(..., "--seq", help="相邻指令序列，分号分隔，支持 * 和 ? wildcard"),
+    context: int = typer.Option(0, "--context", help="匹配前后额外输出的指令条数"),
+    max_results: int = typer.Option(50, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """基于 SQLite 索引搜索相邻指令序列。"""
+    try:
+        from .trace_index import query_sequence
+        results = query_sequence(db, seq, context=context, limit=max_results)
+        if json_output:
+            print_json({"matches": len(results), "results": results})
+            return
+        if not results:
+            print("未匹配到指令序列")
+            return
+        for r in results:
+            first = r["sequence"][0]
+            last = r["sequence"][-1]
+            print(f"  L{r['start_line']:>6}-L{r['end_line']:<6} {first['address']} -> {last['address']}")
+            for item in r["sequence"]:
+                print(f"    [{item['module']}] {item['address']}!{item['offset']} {item['insn']}")
+        print(f"\n匹配 {len(results)} 组")
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)
