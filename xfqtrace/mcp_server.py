@@ -327,6 +327,90 @@ class XfqtraceMcpServer:
                     },
                 },
             ),
+            Tool(
+                name="xfqtrace_diff",
+                description="对比两个 trace 的覆盖差异、opcode/module 分布和首个顺序分歧。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "left": {"type": "string", "description": "左侧 trace 文件路径"},
+                        "right": {"type": "string", "description": "右侧 trace 文件路径"},
+                        "left_text": {"type": "string", "description": "左侧 trace 文本"},
+                        "right_text": {"type": "string", "description": "右侧 trace 文本"},
+                        "max_samples": {"type": "integer", "default": 20},
+                        "ignore_operands": {"type": "boolean", "default": False},
+                        "include_calls": {"type": "boolean", "default": False},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_index",
+                description="将 trace 日志导入 SQLite 索引库，便于后续高效查询。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "trace 日志文件路径，支持 .log / .log.lz4"},
+                        "db": {"type": "string", "description": "输出 SQLite 索引库路径"},
+                        "replace": {"type": "boolean", "default": False},
+                    },
+                    "required": ["input"],
+                },
+            ),
+            Tool(
+                name="xfqtrace_query",
+                description="对 SQLite 索引库执行只读 SELECT/CTE 查询。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "db": {"type": "string", "description": "SQLite 索引库路径"},
+                        "sql": {"type": "string", "description": "只读 SELECT SQL"},
+                        "limit": {"type": "integer", "default": 200},
+                    },
+                    "required": ["db", "sql"],
+                },
+            ),
+            Tool(
+                name="xfqtrace_query_reg",
+                description="按寄存器访问查询索引库中的指令。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "db": {"type": "string", "description": "SQLite 索引库路径"},
+                        "write": {"type": "string", "description": "查询写入/变化的寄存器，如 x0"},
+                        "reg": {"type": "string", "description": "查询未变化访问的寄存器"},
+                        "max_results": {"type": "integer", "default": 50},
+                    },
+                    "required": ["db"],
+                },
+            ),
+            Tool(
+                name="xfqtrace_query_op",
+                description="按 opcode 和可选模块名查询索引库中的指令。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "db": {"type": "string", "description": "SQLite 索引库路径"},
+                        "opcode": {"type": "string", "description": "opcode，如 bl / str / ldr"},
+                        "module": {"type": "string", "description": "模块名过滤"},
+                        "max_results": {"type": "integer", "default": 50},
+                    },
+                    "required": ["db", "opcode"],
+                },
+            ),
+            Tool(
+                name="xfqtrace_query_sequence",
+                description="基于 SQLite 索引搜索相邻指令序列。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "db": {"type": "string", "description": "SQLite 索引库路径"},
+                        "seq": {"type": "string", "description": "相邻指令序列，分号分隔"},
+                        "context": {"type": "integer", "default": 0},
+                        "max_results": {"type": "integer", "default": 50},
+                    },
+                    "required": ["db", "seq"],
+                },
+            ),
         ]
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
@@ -423,6 +507,73 @@ class XfqtraceMcpServer:
                     taint_mem_range=self._parse_range(arguments.get("taint_mem_range")),
                     summary=bool(arguments.get("summary", False)),
                 )
+            elif name == "xfqtrace_diff":
+                from .trace_diff import diff_traces
+                result = diff_traces(
+                    left=arguments.get("left"),
+                    right=arguments.get("right"),
+                    left_text=arguments.get("left_text"),
+                    right_text=arguments.get("right_text"),
+                    max_samples=int(arguments.get("max_samples", 20)),
+                    ignore_operands=bool(arguments.get("ignore_operands", False)),
+                    include_calls=bool(arguments.get("include_calls", False)),
+                )
+            elif name == "xfqtrace_index":
+                from .trace_index import index_trace
+                input_path = str(arguments.get("input") or "").strip()
+                if not input_path:
+                    raise XfqtraceError("必须提供 input")
+                result = index_trace(
+                    input_path,
+                    db_path=arguments.get("db"),
+                    replace=bool(arguments.get("replace", False)),
+                )
+            elif name == "xfqtrace_query":
+                from .trace_index import query_sql
+                db_path = str(arguments.get("db") or "").strip()
+                sql = str(arguments.get("sql") or "").strip()
+                if not db_path or not sql:
+                    raise XfqtraceError("必须提供 db 和 sql")
+                rows = query_sql(db_path, sql, limit=int(arguments.get("limit", 200)))
+                result = {"matches": len(rows), "rows": rows}
+            elif name == "xfqtrace_query_reg":
+                from .trace_index import query_reg
+                db_path = str(arguments.get("db") or "").strip()
+                if not db_path:
+                    raise XfqtraceError("必须提供 db")
+                rows = query_reg(
+                    db_path,
+                    write=arguments.get("write"),
+                    reg=arguments.get("reg"),
+                    limit=int(arguments.get("max_results", 50)),
+                )
+                result = {"matches": len(rows), "results": rows}
+            elif name == "xfqtrace_query_op":
+                from .trace_index import query_op
+                db_path = str(arguments.get("db") or "").strip()
+                opcode = str(arguments.get("opcode") or "").strip()
+                if not db_path or not opcode:
+                    raise XfqtraceError("必须提供 db 和 opcode")
+                rows = query_op(
+                    db_path,
+                    opcode=opcode,
+                    module=arguments.get("module"),
+                    limit=int(arguments.get("max_results", 50)),
+                )
+                result = {"matches": len(rows), "results": rows}
+            elif name == "xfqtrace_query_sequence":
+                from .trace_index import query_sequence
+                db_path = str(arguments.get("db") or "").strip()
+                seq = str(arguments.get("seq") or "").strip()
+                if not db_path or not seq:
+                    raise XfqtraceError("必须提供 db 和 seq")
+                rows = query_sequence(
+                    db_path,
+                    seq,
+                    context=int(arguments.get("context", 0)),
+                    limit=int(arguments.get("max_results", 50)),
+                )
+                result = {"matches": len(rows), "results": rows}
             else:
                 raise XfqtraceError(f"未知工具: {name}")
 

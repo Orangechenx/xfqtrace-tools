@@ -72,6 +72,13 @@ def safe_int(value: Any, default: int, min_value: int = 1) -> int:
     return parsed
 
 
+def _natural_run_sort_key(path: Path) -> tuple[int, int | str]:
+    """日志 run 目录按数字优先排序，避免 10 排在 2 前面。"""
+    if path.name.isdigit():
+        return (0, int(path.name))
+    return (1, path.name)
+
+
 # ── 脚本模板 ──────────────────────────────────────────────────
 
 AGENT_TEMPLATE_RUNTIME = r"""// ======================== 脚本逻辑（一般不需要修改） ========================
@@ -348,6 +355,10 @@ class XfqtraceCore:
         self.device.ensure_ready()
         if not self.device.is_package_installed(pkg):
             raise XfqtraceError(f"目标包未安装: {pkg}")
+        remote_cleanup = self.device.clear_trace_logs(pkg)
+        if not remote_cleanup.get("cleared", False):
+            detail = remote_cleanup.get("stderr") or remote_cleanup.get("stdout") or remote_cleanup.get("trace_dir") or ""
+            raise XfqtraceError(f"清理远端 trace 日志失败: {detail}")
         self.device.push_so(pkg, so_path=so_path)
         trace_result = self.device.run_trace(
             package=pkg,
@@ -363,6 +374,7 @@ class XfqtraceCore:
             "executed": True,
             "ok": ok,
             "errors": errors,
+            "remote_cleanup": remote_cleanup,
             "trace": trace_result,
             "pull": pull_result,
         }
@@ -374,7 +386,7 @@ class XfqtraceCore:
         logs_dir = package_logs_dir(self.tool_root, pkg)
         runs: list[dict[str, Any]] = []
         if logs_dir.exists():
-            for child in sorted(logs_dir.iterdir(), key=lambda x: x.name):
+            for child in sorted(logs_dir.iterdir(), key=_natural_run_sort_key):
                 if not child.is_dir():
                     continue
                 files = [

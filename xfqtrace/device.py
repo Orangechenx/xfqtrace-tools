@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -58,6 +59,39 @@ class FridaDevice:
             capture_output=True, text=True, timeout=10,
         )
         return "frida-server" in r.stdout
+
+    def _frida_server_version(self) -> str:
+        """读取常见路径上的 frida-server 版本，失败时返回空字符串。"""
+        candidates = ["/data/local/tmp/frida-server", "/data/local/tmp/re.frida.server"]
+        try:
+            r = self._adb(
+                "shell",
+                "sh",
+                "-c",
+                "ls /data/local/tmp/frida-server* /data/local/tmp/re.frida.server* 2>/dev/null",
+                timeout=5,
+            )
+            if r.returncode == 0:
+                candidates.extend(line.strip() for line in r.stdout.splitlines() if line.strip())
+        except Exception:
+            pass
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                r = self._adb("shell", candidate, "--version", timeout=5)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip()
+                quoted = shlex.quote(candidate)
+                r = self._adb_shell(f"chmod 755 {quoted} && {quoted} --version", timeout=5)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip()
+            except Exception:
+                continue
+        return ""
 
     def start_frida_server(self) -> None:
         """启动设备 frida-server。"""
@@ -359,6 +393,18 @@ class FridaDevice:
 
     # ── 拉取日志 ─────────────────────────────────────────────────
 
+    def clear_trace_logs(self, package: str) -> dict:
+        """执行新 trace 前清理远端旧日志，避免本地 run 混入历史文件。"""
+        trace_dir = f"/data/data/{package}/files/trace_logs"
+        command = f"if [ -d {trace_dir} ]; then rm -f {trace_dir}/*; fi"
+        r = self._adb_shell(command, timeout=15)
+        return {
+            "cleared": r.returncode == 0,
+            "trace_dir": trace_dir,
+            "stdout": r.stdout.strip(),
+            "stderr": r.stderr.strip(),
+        }
+
     def pull_logs(self, package: str, session_dir: str | Path | None = None) -> dict:
         """从设备拉取 trace 日志到本地 logs/<N>/ 目录。"""
         serial = self.resolve_serial()
@@ -461,6 +507,33 @@ class FridaDevice:
             pass
 
         frida_server_ok = self.check_frida_server() if adb_ok else False
+        frida_server_ver = self._frida_server_version() if frida_server_ok else ""
+        recommended_frida = cfg.RECOMMENDED_FRIDA_VERSION
+        frida_warnings: list[str] = []
+        if frida_ok and frida_ver != recommended_frida:
+            frida_warnings.append(
+                f"当前 frida CLI 版本为 {frida_ver}，推荐使用 {recommended_frida}；"
+                "更换版本可能需要重新编译 libxfqtrace.so。"
+            )
+        if frida_server_ok and not frida_server_ver:
+            frida_warnings.append(
+                "frida-server 正在运行，但无法读取 frida-server 版本；"
+                "请确认设备端路径、执行权限或手动运行 frida-server --version。"
+            )
+        if frida_server_ver and frida_server_ver != recommended_frida:
+            frida_warnings.append(
+                f"当前 frida-server 版本为 {frida_server_ver}，推荐使用 {recommended_frida}；"
+                "请确保设备端和引擎 SO 的 frida-gum 版本匹配。"
+            )
+        if frida_ver and frida_server_ver and frida_ver != frida_server_ver:
+            frida_warnings.append(
+                f"frida CLI({frida_ver}) 与 frida-server({frida_server_ver}) 版本不一致。"
+            )
+        frida_version_ok = (
+            frida_ok
+            and frida_ver == recommended_frida
+            and (not frida_server_ver or frida_server_ver == recommended_frida)
+        )
 
         so_ok = cfg.engine_so_path(self.tool_root).exists()
 
@@ -468,7 +541,15 @@ class FridaDevice:
 
         return {
             "device": {"serial": serial, "connected": adb_ok},
-            "frida": {"cli_ok": frida_ok, "cli_version": frida_ver, "server_running": frida_server_ok},
+            "frida": {
+                "cli_ok": frida_ok,
+                "cli_version": frida_ver,
+                "server_running": frida_server_ok,
+                "server_version": frida_server_ver,
+                "recommended_version": recommended_frida,
+                "version_ok": frida_version_ok,
+                "warnings": frida_warnings,
+            },
             "assets": {
                 "tool_root": str(self.tool_root),
                 "tool_root_exists": self.tool_root.exists(),

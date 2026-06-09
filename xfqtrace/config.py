@@ -17,6 +17,7 @@ BYPASS_DIR = "scripts"
 BIN_DIR = "bin"
 ENGINE_SO = "libxfqtrace.so"
 LZ4_EXE = "lz4.exe"
+RECOMMENDED_FRIDA_VERSION = "16.2.1"
 
 
 def vendor_dir() -> Path:

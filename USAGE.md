@@ -27,6 +27,7 @@
    - [branch](#49-branch--分支命中率分析)
    - [taint](#410-taint--污点分析)
    - [index / query](#411-index--query--sqlite-索引查询)
+   - [diff](#412-diff--多-trace-差异对比)
 5. [配置详解](#5-配置详解)
 6. [实战场景](#6-实战场景)
 7. [MCP Server 配置](#7-mcp-server-配置)
@@ -112,9 +113,9 @@ xfq info
 | 工具 | 用途 | 安装方式 |
 |---|---|---|
 | `adb` | 设备通信 | `brew install --cask android-platform-tools` / Platform Tools |
-| `frida` | 动态插桩 | `pipx install frida-tools` |
-| `frida-server` | 设备端 agent | 下载推送到 `/data/local/tmp/` |
-| `lz4` | 日志解压 | `brew install lz4`（可选） |
+| `frida` | 动态插桩 | 推荐 `16.2.1`，如 `pipx install frida-tools==16.2.1` |
+| `frida-server` | 设备端 agent | 推荐 `16.2.1`，推送到 `/data/local/tmp/` |
+| `lz4` | 日志解压 | `brew install lz4`（可选）；Windows 可使用包内 `_vendor/lz4.exe` |
 
 ---
 
@@ -212,7 +213,7 @@ xfq gen-config \
 
 ### 3.4 run — 执行 trace
 
-全自动完成：推送 SO → frida 注入 → 等待 trace 完成 → 拉取日志 → 解压。
+全自动完成：清理远端旧 trace → 推送 SO → frida 注入 → 等待 trace 完成 → 拉取日志 → 解压。
 
 **默认 dry-run（只输出计划，不实际执行）：**
 
@@ -266,6 +267,8 @@ xfq run -p cn.damai --serial 11041FDD4003U6 --execute
   [+] xfqtrace_xxx.log (976,038 bytes)           ← 拉取到本地
 ```
 
+`run --execute` 会在启动 Frida 前清理 `/data/data/<package>/files/trace_logs` 下的旧 trace 文件。清理失败会直接停止执行，避免本地新 run 混入历史日志。
+
 ---
 
 ### 3.5 pull-only — 拉取日志
@@ -285,6 +288,7 @@ xfq pull-only -p cn.damai --execute   # 真实执行拉取
 
 ```bash
 xfq list-logs -p cn.damai
+xfq list-logs cn.damai --json
 ```
 
 **预览日志内容：**
@@ -292,12 +296,14 @@ xfq list-logs -p cn.damai
 ```bash
 # 预览最新日志（前 8KB）
 xfq preview-log -p cn.damai
+xfq preview-log cn.damai
 
 # 预览指定 run
 xfq preview-log -p cn.damai --run-id 1
 
 # 预览前 500 字节
 xfq preview-log -p cn.damai --max-bytes 500
+xfq preview-log cn.damai --max 500 --json
 ```
 
 ---
@@ -548,15 +554,17 @@ xfq branch trace.log --min-rate 90   # 只看跳转率 > 90% 的分支
 输出：
 
 ```
-模块                 偏移      指令         跳转   不跳   跳转率
-libsgmainso          0x55110   b.ne #-0x4c  156    0     100.0%
-libsgmainso          0x55084   cbz w1,#0x90 15     0     100.0%
+模块                 偏移      指令         跳转   不跳   未知   跳转率
+libsgmainso          0x55110   b.ne #-0x4c  156    0     0      100.0%
+libsgmainso          0x55084   cbz w1,#0x90 15     0     0      100.0%
 ```
 
 说明：
 
 - AArch64 trace 默认按 4 字节指令估算 fallthrough，JSON 中会标注 `arch_assumption: aarch64_fixed_4_bytes`。
 - 如果日志模块名包含 Thumb 标记或可从地址推断 Thumb，会标注 `thumb_inferred_2_bytes`。
+- 如果 trace 没有指令集标记且地址为偶数，工具会按 AArch64 处理；真正的 ARM32/Thumb trace 可能误判，需要结合样本人工校验。
+- 如果下一条 trace 指令既不是 fallthrough，也不是显式 target，会计入 `unknown` 并输出 warning。这通常表示 trace 间隙、中断、信号或日志缺口，不会被误算为 taken。
 - `br`、`blr` 等间接跳转会统计为 `type=indirect`，不强行推断命中率。
 
 ### 4.10 taint — 污点分析
@@ -585,9 +593,11 @@ xfq taint trace.log --taint x2 --json
 
 注意：
 
-- 内存污点按地址粒度记录，不模拟完整字节级别 CPU 语义；`strb` 等部分写会在输出 warning 中说明。
+- 内存污点按字节地址记录，`strb/strh/str/stp/ldp` 会按访问宽度传播，避免 1 字节写入污染相邻字节。
+- 未知访问宽度、向量寄存器和未覆盖的复杂指令仍按保守规则处理；`taint` 适合快速判断数据是否参与计算，不等价于完整 CPU 模拟器。
 - `--taint-mem` 使用区间摘要存储，不会为大范围内的每个地址初始化一个字典项。
 - `w0` 等 32 位寄存器写入会清理对应 `x0` 的旧污点，避免高位污点误留。
+- JSON 输出包含 `unparsed_line_count`、`unparsed_samples`、`unsupported_instruction_count`、`unsupported_instruction_samples`，用于定位异常行和 SIMD/FP 未建模指令造成的传播缺口。
 
 输出：
 ```
@@ -610,7 +620,7 @@ xfq taint trace.log --taint x2 --json
 
 ### 4.11 index / query — SQLite 索引查询
 
-当同一个大 trace 需要反复查询时，可以先导入 SQLite 索引库。原始 `.log` / `.log.lz4` 仍然保留，`trace.db` 只是可删除重建的查询缓存。
+当同一个大 trace 需要反复查询时，可以先导入 SQLite 索引库。原始 `.log` / `.log.lz4` 仍然保留，`trace.db` 只是可删除重建的查询缓存。导入过程使用批量写入和临时 DB，成功后原子替换目标 DB；中途失败不会破坏原有索引库。
 
 ```bash
 # 建立索引，默认不覆盖已有 db
@@ -628,10 +638,10 @@ xfq index trace.log --db trace.db --json
 | 表 | 说明 |
 |---|---|
 | `trace_file` | 原始 trace 文件路径、大小、hash、导入统计 |
-| `insn` | 指令主表，包含行号、模块、地址、opcode、操作数、原始行 |
+| `insn` | 指令主表，包含行号、模块、地址、无符号十六进制地址、opcode、操作数、原始行 |
 | `reg_access` | 寄存器 before/after 值和 `changed` 写入标记 |
 | `mem_access` | load/store 的读写方向、解析出的内存地址和大小 |
-| `parse_error` | 非指令行或解析失败行，便于排查日志格式漂移 |
+| `parse_error` | 真正无法解析的噪声/异常行；`call func:` 和 `ret:` 结构行不会计入解析失败 |
 
 常用查询：
 
@@ -652,6 +662,8 @@ xfq query-seq trace.db --seq "ldr x0, *; bl strcmp" --context 2
 xfq query trace.db --sql "SELECT line_no, module, insn FROM insn WHERE opcode='bl' LIMIT 20"
 ```
 
+`query-seq` 当前最多支持 10 段相邻序列。更长模式会生成过大的 SQL JOIN，工具会提前报错；这类场景建议先用 `query`/`query-op` 缩小范围，再分段匹配。
+
 `query` 只允许单条 `SELECT` / `WITH` 查询，并开启 SQLite `query_only`，避免误删索引库。查寄存器时不要用 `LIKE '%x0%'`，应使用 `reg_access`：
 
 ```sql
@@ -662,7 +674,61 @@ WHERE r.reg = 'x0'
   AND r.changed = 1;
 ```
 
+ARM64 地址可能超过 SQLite signed 64-bit 正数范围。索引库会把无符号地址转换为 signed64 存储，同时在 `insn.address_uhex`、`insn.offset_uhex`、`mem_access.address_uhex` 中保留无符号十六进制文本。自定义 SQL 比较高地址时不要直接写无符号整数字面量，使用内置函数 `xfq_addr()`：
+
+```sql
+SELECT line_no, module, insn
+FROM insn
+WHERE address = xfq_addr('0xfffffffffffffff0');
+```
+
+如果只是想按文本地址查询或展示，可以直接用 `address_uhex` 或 `xfq_hex()`：
+
+```sql
+SELECT line_no, module, address_uhex, insn
+FROM insn
+WHERE address_uhex = '0xfffffffffffffff0';
+
+SELECT line_no, xfq_hex(address) AS address_hex, insn
+FROM insn
+WHERE opcode = 'ldr';
+```
+
 相比直接 `grep/search-seq`，索引查询的优势是“导入一次，多次复用解析结果”。如果只查一次小日志，直接用原有命令更简单；如果是几百 MB 或 GB 级日志反复探索，优先建索引。
+
+### 4.12 diff — 多 trace 差异对比
+
+对比两个 trace 的指令覆盖、opcode/module 分布和首个顺序分歧。适合比较不同输入、不同 run 或修复前后的执行路径。
+
+```bash
+# 人类可读输出
+xfq diff run_a.log run_b.log
+
+# JSON 输出，限制左右独有 offset 样本数量
+xfq diff run_a.log run_b.log --json --max-samples 10
+
+# 只按 module/offset/opcode 比较顺序，忽略操作数差异
+xfq diff run_a.log run_b.log --ignore-operands
+
+# 顺序比对包含 hook call/ret 结构行
+xfq diff run_a.log run_b.log --include-calls
+```
+
+输出字段：
+
+| 字段 | 说明 |
+|---|---|
+| `left/right.instruction_count` | 两侧指令数量 |
+| `left/right.opcode_counts` | 两侧 opcode 分布 |
+| `coverage.shared_offsets_count` | 两侧都覆盖到的 `module:offset` 数量 |
+| `coverage.left_only_offsets_count` | 只在左侧出现的 offset 数量 |
+| `coverage.right_only_offsets_count` | 只在右侧出现的 offset 数量 |
+| `first_divergence` | 按 trace 顺序比较时第一处不一致的位置；默认比较 `module/offset/insn` |
+
+说明：
+
+- `--ignore-operands` 也可写成 `--fuzzy`，首个顺序分歧只比较 `module/offset/opcode`，适合忽略操作数文本差异。
+- `--include-calls` 会把 `call func:` 和 `ret:` 结构行纳入顺序比对；覆盖统计仍只统计真实指令 offset。
 
 ---
 
@@ -930,8 +996,16 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 | `xfqtrace_mempat` | 内存访问模式检测 |
 | `xfqtrace_branch` | 分支命中率分析 |
 | `xfqtrace_taint` | 污点传播分析 |
+| `xfqtrace_diff` | 多 trace 覆盖和顺序差异对比 |
+| `xfqtrace_index` | 将 trace 导入 SQLite 索引库 |
+| `xfqtrace_query` | 执行只读 SQL 查询 |
+| `xfqtrace_query_reg` | 按寄存器访问查询索引库 |
+| `xfqtrace_query_op` | 按 opcode/module 查询索引库 |
+| `xfqtrace_query_sequence` | 基于索引查询相邻指令序列 |
 
 分析类 MCP 工具支持直接传 `text`、传 `input` 文件路径，或传 `package` 自动解析本地日志；当同一包有多个 run 时可用 `run_id` 指定目录。
+`xfqtrace_diff` 是双输入工具，支持 `left/right` 路径或 `left_text/right_text` 文本，并支持 `ignore_operands`、`include_calls` 和 `max_samples`。
+数据库类 MCP 工具直接复用 CLI 的 SQLite 索引能力：先用 `xfqtrace_index` 建库，再用 `xfqtrace_query` / `xfqtrace_query_reg` / `xfqtrace_query_op` / `xfqtrace_query_sequence` 查询。
 
 ---
 
@@ -966,7 +1040,15 @@ xfq gen-config -p com.example.app --so libtarget.so --offset 0x1234 --inline-hoo
 
 ### Q: frida 版本不匹配
 
-`xfq` 不依赖 Python frida 包，全程调系统 `frida` 二进制。只要 `frida --version` 和设备的 `frida-server --version` 一致即可。
+`xfq` 不依赖 Python frida 包，全程调系统 `frida` 二进制。但内置 `libxfqtrace.so` 依赖特定 frida-gum ABI，当前推荐 `frida/frida-server 16.2.1`。如果更换 Frida 大版本，即使 CLI 和设备端版本一致，也可能需要重新编译引擎 SO。
+
+```bash
+frida --version
+adb shell /data/local/tmp/frida-server --version
+xfq doctor
+```
+
+`doctor` 会输出 `recommended_version`、`version_ok` 和 `warnings`，用于快速判断版本风险。若设备端 frida-server 正在运行但版本读取失败，`doctor` 只给 warning，不会直接判定环境失败；这种情况通常是路径或执行权限问题。
 
 ### Q: 如何找到函数偏移
 

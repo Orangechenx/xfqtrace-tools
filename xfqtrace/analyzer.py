@@ -36,6 +36,7 @@ from .trace_stats import regdiff, slice_trace, stats
 from .trace_branch import branch_analysis
 from .trace_taint import taint_analysis, format_taint_result
 from .trace_index import index_trace, query_op, query_reg, query_sequence as query_index_sequence, query_sql
+from .trace_diff import diff_traces
 
 __all__ = [
     "LARGE_TRACE_WARNING_BYTES",
@@ -55,6 +56,7 @@ __all__ = [
     "detect_sequential_access",
     "detect_xor_loop",
     "detect_xor_loop_stream",
+    "diff_traces",
     "format_stack_tree",
     "format_taint_result",
     "grep",

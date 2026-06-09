@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generator
 
+from . import config as cfg
+
 LARGE_TRACE_WARNING_BYTES = 500 * 1024 * 1024
 
 
@@ -190,6 +192,10 @@ def _iter_path_text_lines(path: Path) -> Generator[str, None, None]:
     """逐行读取普通文本或 .lz4 压缩 trace。"""
     if path.name.endswith(".lz4"):
         lz4_bin = shutil.which("lz4")
+        if not lz4_bin:
+            vendor_lz4 = cfg.vendor_dir() / cfg.LZ4_EXE
+            if vendor_lz4.exists():
+                lz4_bin = str(vendor_lz4)
         if not lz4_bin:
             raise RuntimeError(f"lz4 不可用，无法读取压缩 trace: {path}")
         proc = subprocess.Popen(

@@ -26,6 +26,35 @@ def _infer_instruction_step(tl: TraceLine) -> tuple[int, str, list[str]]:
     ]
 
 
+def _parse_branch_target(insn: str, current_addr: int) -> int | None:
+    """解析分支目标；带 # 的立即数按相对偏移处理。"""
+    relative_matches = list(re.finditer(r"#(?P<delta>-?0[xX][0-9a-fA-F]+|-?\d+)", insn))
+    if relative_matches:
+        try:
+            return (current_addr & ~1) + int(relative_matches[-1].group("delta"), 0)
+        except ValueError:
+            return None
+
+    m_target = re.search(r"(0[xX][0-9a-fA-F]+)", insn)
+    if not m_target:
+        return None
+    try:
+        return int(m_target.group(0), 16)
+    except ValueError:
+        return None
+
+
+def _same_trace_addr(left: int, right: int) -> bool:
+    """忽略 Thumb 状态位比较 trace 地址。"""
+    return (left & ~1) == (right & ~1)
+
+
+def _append_warning(info: dict, warning: str) -> None:
+    warnings = info.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+
+
 def branch_analysis(paths: list[str | Path] | str | Path | None = None,
                     text: str | None = None,
                     log_dir: str | Path | None = None,
@@ -47,10 +76,17 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
             key = f"{pending.module}:{hex(pending.offset)} {pending_insn}"
             instruction_size, _, _ = _infer_instruction_step(pending)
             fallthrough_addr = (pending.address & ~1) + instruction_size
-            if tl.address == fallthrough_addr:
+            target_addr = branches[key].get("target_address")
+            if _same_trace_addr(tl.address, fallthrough_addr):
                 branches[key]["not_taken"] += 1
-            else:
+            elif target_addr is not None and _same_trace_addr(tl.address, target_addr):
                 branches[key]["taken"] += 1
+            else:
+                branches[key]["unknown"] += 1
+                _append_warning(
+                    branches[key],
+                    "下一条 trace 指令既不是 fallthrough 也不是显式 target，可能存在 trace 间隙/中断/信号，已计入 unknown。",
+                )
             pending_conditional = None
 
         insn = tl.insn
@@ -80,8 +116,8 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
             continue
 
         # 提取跳转目标（可能是绝对地址或偏移）
-        m_target = re.search(r"(0[xX][0-9a-fA-F]+)", insn)
-        target_str = m_target.group(0) if m_target else ""
+        target_addr = _parse_branch_target(insn, tl.address)
+        target_str = hex(target_addr) if target_addr is not None else ""
 
         key = f"{tl.module}:{hex(tl.offset)} {insn}"
         if key not in branches:
@@ -94,12 +130,22 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
                 "offset": hex(tl.offset),
                 "insn": insn,
                 "target": target_str,
+                "target_address": target_addr,
                 "taken": 0,
                 "not_taken": 0,
+                "unknown": 0,
                 "warnings": warnings,
             }
 
         pending_conditional = tl
+
+    if pending_conditional is not None:
+        key = f"{pending_conditional.module}:{hex(pending_conditional.offset)} {pending_conditional.insn}"
+        branches[key]["unknown"] += 1
+        _append_warning(
+            branches[key],
+            "条件分支后没有下一条 trace 指令，无法判断 taken/not_taken，已计入 unknown。",
+        )
 
     results = []
     for key, info in branches.items():
@@ -114,14 +160,16 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
                 "target": info["target"],
                 "taken": 0,
                 "not_taken": 0,
+                "unknown": 0,
                 "taken_ratio": 0,
                 "total": info["count"],
                 "warnings": info.get("warnings", []),
             })
             continue
 
-        total = info["taken"] + info["not_taken"]
-        rate = (info["taken"] / total * 100) if total > 0 else 0
+        known_total = info["taken"] + info["not_taken"]
+        total = known_total + info.get("unknown", 0)
+        rate = (info["taken"] / known_total * 100) if known_total > 0 else 0
         results.append({
             "type": "conditional",
             "arch_assumption": info["arch_assumption"],
@@ -132,6 +180,7 @@ def branch_analysis(paths: list[str | Path] | str | Path | None = None,
             "target": info["target"],
             "taken": info["taken"],
             "not_taken": info["not_taken"],
+            "unknown": info.get("unknown", 0),
             "taken_ratio": round(rate, 1),
             "total": total,
             "warnings": info.get("warnings", []),

@@ -43,6 +43,16 @@ def print_json(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def select_package_arg(package_arg: str | None, package_option: str | None) -> str:
+    """兼容位置包名和 -p/--package，避免两个入口传入不同包名。"""
+    if package_arg and package_option and package_arg != package_option:
+        raise XfqtraceError(f"位置包名与 --package 不一致: {package_arg} != {package_option}")
+    package = package_option or package_arg
+    if not package:
+        raise XfqtraceError("请通过位置参数或 -p/--package 指定目标包名")
+    return package
+
+
 def is_failed_run_result(result: dict) -> bool:
     return result.get("executed") is True and result.get("ok") is False
 
@@ -208,29 +218,37 @@ def pull_only(
 
 @app.command(name="list-logs")
 def list_logs(
-    package: str = typer.Option(..., "-p", "--package", help="目标包名"),
+    package: Optional[str] = typer.Argument(None, help="目标包名"),
+    package_option: Optional[str] = typer.Option(None, "-p", "--package", help="目标包名"),
     tool_root: Optional[str] = typer.Option(None, "--tool-root", help="原始工具目录路径"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出（默认即 JSON）"),
 ):
     """列出本地 trace 日志。"""
-    core = get_core(tool_root=tool_root)
-    print_json(core.list_logs(package))
+    try:
+        core = get_core(tool_root=tool_root)
+        print_json(core.list_logs(select_package_arg(package, package_option)))
+    except XfqtraceError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 # ── preview-log ─────────────────────────────────────────────────
 
 @app.command(name="preview-log")
 def preview_log(
-    package: str = typer.Option(..., "-p", "--package", help="目标包名"),
+    package: Optional[str] = typer.Argument(None, help="目标包名"),
+    package_option: Optional[str] = typer.Option(None, "-p", "--package", help="目标包名"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="logs 下的运行编号"),
     relative_path: Optional[str] = typer.Option(None, "--relative-path", help="run 目录内相对路径"),
-    max_bytes: int = typer.Option(8192, "--max-bytes", help="最大读取字节数"),
+    max_bytes: int = typer.Option(8192, "--max-bytes", "--max", help="最大读取字节数"),
     tool_root: Optional[str] = typer.Option(None, "--tool-root", help="原始工具目录路径"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出（默认即 JSON）"),
 ):
     """预览 trace 日志文件。"""
     try:
         core = get_core(tool_root=tool_root)
         print_json(core.preview_log(
-            package=package,
+            package=select_package_arg(package, package_option),
             run_id=run_id,
             relative_path=relative_path,
             max_bytes=max_bytes,
@@ -741,10 +759,13 @@ def branch(
         if not results:
             print("未发现条件分支指令")
             return
-        print(f"{'模块':<35} {'偏移':<12} {'指令':<25} {'跳转':<8} {'不跳':<8} {'跳转率':<8}")
-        print("-" * 100)
+        print(f"{'模块':<35} {'偏移':<12} {'指令':<25} {'跳转':<8} {'不跳':<8} {'未知':<8} {'跳转率':<10}")
+        print("-" * 110)
         for r in results[:30]:
-            print(f"{r['module']:<35} {r['offset']:<12} {r['insn']:<25} {r['taken']:<8} {r['not_taken']:<8} {r['taken_ratio']:<7}%")
+            print(
+                f"{r['module']:<35} {r['offset']:<12} {r['insn']:<25} "
+                f"{r['taken']:<8} {r['not_taken']:<8} {r.get('unknown', 0):<8} {r['taken_ratio']:<9}%"
+            )
         print(f"\n共 {len(results)} 个分支")
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
@@ -953,6 +974,54 @@ def query_seq_cmd(
             for item in r["sequence"]:
                 print(f"    [{item['module']}] {item['address']}!{item['offset']} {item['insn']}")
         print(f"\n匹配 {len(results)} 组")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ── diff ────────────────────────────────────────────────────────
+
+@app.command(name="diff")
+def diff_cmd(
+    left: str = typer.Argument(..., help="左侧 trace 日志文件路径"),
+    right: str = typer.Argument(..., help="右侧 trace 日志文件路径"),
+    max_samples: int = typer.Option(20, "--max-samples", help="左右独有 offset 样本数量"),
+    ignore_operands: bool = typer.Option(False, "--ignore-operands", "--fuzzy", help="顺序分歧只比较 module/offset/opcode，忽略操作数差异"),
+    include_calls: bool = typer.Option(False, "--include-calls", help="顺序分歧包含 hook call/ret 结构行"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """对比两个 trace 的覆盖差异和第一处顺序分歧。"""
+    try:
+        from .trace_diff import diff_traces
+        result = diff_traces(
+            left,
+            right,
+            max_samples=max_samples,
+            ignore_operands=ignore_operands,
+            include_calls=include_calls,
+        )
+        if json_output:
+            print_json(result)
+            return
+
+        coverage = result["coverage"]
+        print("Trace 差异对比")
+        print(f"  左侧指令数: {result['left']['instruction_count']:,}")
+        print(f"  右侧指令数: {result['right']['instruction_count']:,}")
+        print(f"  共同 offset: {coverage['shared_offsets_count']:,}")
+        print(f"  左侧独有: {coverage['left_only_offsets_count']:,}")
+        print(f"  右侧独有: {coverage['right_only_offsets_count']:,}")
+        divergence = result.get("first_divergence")
+        if divergence:
+            print(f"  首个顺序分歧: 第 {divergence['index']} 条指令")
+            if divergence.get("left"):
+                left_item = divergence["left"]
+                print(f"    left  L{left_item['line_no']}: {left_item['module']}!{left_item['offset']} {left_item['insn']}")
+            if divergence.get("right"):
+                right_item = divergence["right"]
+                print(f"    right L{right_item['line_no']}: {right_item['module']}!{right_item['offset']} {right_item['insn']}")
+        else:
+            print("  首个顺序分歧: 无")
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         raise typer.Exit(1)

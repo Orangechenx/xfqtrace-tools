@@ -3,7 +3,9 @@ from __future__ import annotations
 """SQLite trace 索引和查询辅助函数。"""
 
 import hashlib
+import os
 import sqlite3
+import tempfile
 from collections.abc import Iterable
 from contextlib import closing
 from datetime import datetime, timezone
@@ -15,7 +17,9 @@ from .trace_io import TraceLine, _reg_canonical, iter_raw_lines, parse_line
 from .trace_memory import LOAD_OPS, STORE_OPS, _get_mem_addr
 from .trace_search import _match_insn_pattern
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+IMPORT_BATCH_SIZE = 1000
+MAX_SEQUENCE_PARTS = 10
 
 
 def _sqlite_int(value: int | None) -> int | None:
@@ -27,6 +31,28 @@ def _sqlite_int(value: int | None) -> int | None:
     if 0 <= value <= (1 << 64) - 1:
         return value - (1 << 64)
     return value
+
+
+def _sqlite_addr(value: Any) -> int | None:
+    """SQL 辅助函数：把文本/整数地址转换为索引库里的 signed64 表示。"""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return _sqlite_int(value)
+    raw = str(value).strip()
+    if not raw:
+        return None
+    return _sqlite_int(int(raw, 0))
+
+
+def _sqlite_hex(value: Any) -> str | None:
+    """SQL 辅助函数：把 signed64 地址显示为 unsigned 十六进制文本。"""
+    if value is None:
+        return None
+    raw_value = int(str(value), 0) if not isinstance(value, int) else value
+    if raw_value < 0:
+        raw_value += 1 << 64
+    return hex(raw_value)
 
 
 def _open(db_path: str | Path) -> sqlite3.Connection:
@@ -60,9 +86,6 @@ def _hash_file(path: Path) -> str:
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
-        PRAGMA journal_mode=WAL;
-        PRAGMA synchronous=NORMAL;
-
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -85,7 +108,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             line_no INTEGER NOT NULL,
             module TEXT NOT NULL,
             address INTEGER NOT NULL,
+            address_uhex TEXT NOT NULL,
             offset INTEGER NOT NULL,
+            offset_uhex TEXT NOT NULL,
             opcode TEXT NOT NULL,
             operands TEXT,
             insn TEXT NOT NULL,
@@ -105,6 +130,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             insn_id INTEGER NOT NULL,
             kind TEXT NOT NULL,
             address INTEGER,
+            address_uhex TEXT,
             size INTEGER,
             parse_ok INTEGER NOT NULL DEFAULT 0,
             expr TEXT
@@ -116,13 +142,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             raw TEXT NOT NULL,
             reason TEXT NOT NULL
         );
-
-        CREATE INDEX IF NOT EXISTS idx_insn_file_line ON insn(file_id, line_no);
-        CREATE INDEX IF NOT EXISTS idx_insn_opcode ON insn(opcode);
-        CREATE INDEX IF NOT EXISTS idx_insn_module_addr ON insn(module, address);
-        CREATE INDEX IF NOT EXISTS idx_reg_access_reg_changed ON reg_access(reg, changed, insn_id);
-        CREATE INDEX IF NOT EXISTS idx_reg_access_value ON reg_access(reg, after_value);
-        CREATE INDEX IF NOT EXISTS idx_mem_access_addr ON mem_access(kind, address);
         """
     )
     conn.execute(
@@ -131,24 +150,35 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _create_indexes(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_insn_file_line ON insn(file_id, line_no);
+        CREATE INDEX IF NOT EXISTS idx_insn_opcode ON insn(opcode);
+        CREATE INDEX IF NOT EXISTS idx_insn_module_addr ON insn(module, address);
+        CREATE INDEX IF NOT EXISTS idx_insn_addr_uhex ON insn(address_uhex);
+        CREATE INDEX IF NOT EXISTS idx_reg_access_reg_changed ON reg_access(reg, changed, insn_id);
+        CREATE INDEX IF NOT EXISTS idx_reg_access_value ON reg_access(reg, after_value);
+        CREATE INDEX IF NOT EXISTS idx_mem_access_addr ON mem_access(kind, address);
+        CREATE INDEX IF NOT EXISTS idx_mem_access_addr_uhex ON mem_access(kind, address_uhex);
+        """
+    )
+
+
 def _clear_existing(conn: sqlite3.Connection) -> None:
     for table in ("parse_error", "mem_access", "reg_access", "insn", "trace_file"):
         conn.execute(f"DELETE FROM {table}")
 
 
-def _insert_regs(conn: sqlite3.Connection, insn_id: int, tl: TraceLine) -> None:
+def _collect_regs(insn_id: int, tl: TraceLine) -> list[tuple[Any, ...]]:
     regs = sorted({_reg_canonical(reg) for reg in (*tl.regs_before.keys(), *tl.regs_after.keys())})
+    rows: list[tuple[Any, ...]] = []
     for reg in regs:
         before = _lookup_trace_reg(tl.regs_before, reg)
         after = _lookup_trace_reg(tl.regs_after, reg)
         changed = int(after is not None and before != after)
-        conn.execute(
-            """
-            INSERT INTO reg_access(insn_id, reg, before_value, after_value, changed)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (insn_id, reg, _sqlite_int(before), _sqlite_int(after), changed),
-        )
+        rows.append((insn_id, reg, _sqlite_int(before), _sqlite_int(after), changed))
+    return rows
 
 
 def _lookup_trace_reg(regs: dict[str, int], reg: str) -> int | None:
@@ -189,30 +219,70 @@ def _infer_mem_size(opcode: str, operands: str) -> int | None:
     return None
 
 
-def _insert_mem_access(conn: sqlite3.Connection, insn_id: int, tl: TraceLine, opcode: str, operands: str) -> None:
+def _collect_mem_access(insn_id: int, tl: TraceLine, opcode: str, operands: str) -> list[tuple[Any, ...]]:
     kind = ""
     if opcode in STORE_OPS:
         kind = "write"
     elif opcode in LOAD_OPS:
         kind = "read"
     if not kind:
-        return
+        return []
 
     address = _get_mem_addr(tl.insn, tl.regs_before)
-    conn.execute(
-        """
-        INSERT INTO mem_access(insn_id, kind, address, size, parse_ok, expr)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
+    return [
         (
             insn_id,
             kind,
             _sqlite_int(address),
+            _sqlite_hex(address),
             _infer_mem_size(opcode, operands),
             int(address is not None),
             _mem_expr(tl.insn),
-        ),
-    )
+        )
+    ]
+
+
+def _flush_batches(
+    conn: sqlite3.Connection,
+    insn_rows: list[tuple[Any, ...]],
+    reg_rows: list[tuple[Any, ...]],
+    mem_rows: list[tuple[Any, ...]],
+    parse_error_rows: list[tuple[Any, ...]],
+) -> None:
+    if insn_rows:
+        conn.executemany(
+            """
+            INSERT INTO insn(id, file_id, line_no, module, address, address_uhex,
+                             offset, offset_uhex, opcode, operands, insn, raw)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            insn_rows,
+        )
+        insn_rows.clear()
+    if reg_rows:
+        conn.executemany(
+            """
+            INSERT INTO reg_access(insn_id, reg, before_value, after_value, changed)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            reg_rows,
+        )
+        reg_rows.clear()
+    if mem_rows:
+        conn.executemany(
+            """
+            INSERT INTO mem_access(insn_id, kind, address, address_uhex, size, parse_ok, expr)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            mem_rows,
+        )
+        mem_rows.clear()
+    if parse_error_rows:
+        conn.executemany(
+            "INSERT INTO parse_error(file_id, line_no, raw, reason) VALUES (?, ?, ?, ?)",
+            parse_error_rows,
+        )
+        parse_error_rows.clear()
 
 
 def index_trace(path: str | Path, db_path: str | Path | None = None, *, replace: bool = False) -> dict[str, Any]:
@@ -226,73 +296,99 @@ def index_trace(path: str | Path, db_path: str | Path | None = None, *, replace:
         raise FileExistsError(f"索引库已存在，如需覆盖请使用 --replace: {db}")
     db.parent.mkdir(parents=True, exist_ok=True)
 
-    with closing(_open(db)) as conn:
-        with conn:
-            _init_schema(conn)
-            if replace:
-                _clear_existing(conn)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{db.name}.", suffix=".tmp", dir=db.parent)
+    os.close(fd)
+    temp_db = Path(temp_name)
+    try:
+        with closing(_open(temp_db)) as conn:
+            conn.execute("PRAGMA journal_mode=MEMORY")
+            conn.execute("PRAGMA synchronous=OFF")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+            with conn:
+                _init_schema(conn)
+                if replace:
+                    _clear_existing(conn)
 
-            cursor = conn.execute(
-                """
-                INSERT INTO trace_file(path, size, sha256, imported_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    str(trace_path.resolve()),
-                    trace_path.stat().st_size,
-                    _hash_file(trace_path),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            file_id = int(cursor.lastrowid)
-
-            line_count = 0
-            parsed_count = 0
-            parse_failed_count = 0
-            for line_no, line in iter_raw_lines(paths=[trace_path]):
-                line_count += 1
-                tl = parse_line(line, line_no)
-                if tl is None:
-                    continue
-                if not tl.is_instruction:
-                    parse_failed_count += 1
-                    conn.execute(
-                        "INSERT INTO parse_error(file_id, line_no, raw, reason) VALUES (?, ?, ?, ?)",
-                        (file_id, line_no, tl.raw, "非指令行或格式无法解析"),
-                    )
-                    continue
-
-                opcode, operands = _split_insn(tl.insn)
                 cursor = conn.execute(
                     """
-                    INSERT INTO insn(file_id, line_no, module, address, offset, opcode, operands, insn, raw)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO trace_file(path, size, sha256, imported_at)
+                    VALUES (?, ?, ?, ?)
                     """,
                     (
-                        file_id,
-                        tl.line_no,
-                        tl.module,
-                        _sqlite_int(tl.address),
-                        _sqlite_int(tl.offset),
-                        opcode,
-                        operands,
-                        tl.insn,
-                        tl.raw,
+                        str(trace_path.resolve()),
+                        trace_path.stat().st_size,
+                        _hash_file(trace_path),
+                        datetime.now(timezone.utc).isoformat(),
                     ),
                 )
-                insn_id = int(cursor.lastrowid)
-                parsed_count += 1
-                _insert_regs(conn, insn_id, tl)
-                _insert_mem_access(conn, insn_id, tl, opcode, operands)
+                file_id = int(cursor.lastrowid)
 
-            conn.execute(
-                """
-                UPDATE trace_file
-                SET line_count = ?, parsed_count = ?, parse_failed_count = ?
-                WHERE id = ?
-                """,
-                (line_count, parsed_count, parse_failed_count, file_id),
-            )
+                line_count = 0
+                parsed_count = 0
+                parse_failed_count = 0
+                next_insn_id = 1
+                insn_rows: list[tuple[Any, ...]] = []
+                reg_rows: list[tuple[Any, ...]] = []
+                mem_rows: list[tuple[Any, ...]] = []
+                parse_error_rows: list[tuple[Any, ...]] = []
+
+                for line_no, line in iter_raw_lines(paths=[trace_path]):
+                    line_count += 1
+                    tl = parse_line(line, line_no)
+                    if tl is None:
+                        continue
+                    if tl.is_call or tl.is_ret:
+                        continue
+                    if not tl.is_instruction:
+                        parse_failed_count += 1
+                        parse_error_rows.append((file_id, line_no, tl.raw, "格式无法解析"))
+                        if len(parse_error_rows) >= IMPORT_BATCH_SIZE:
+                            _flush_batches(conn, insn_rows, reg_rows, mem_rows, parse_error_rows)
+                        continue
+
+                    opcode, operands = _split_insn(tl.insn)
+                    insn_id = next_insn_id
+                    next_insn_id += 1
+                    insn_rows.append(
+                        (
+                            insn_id,
+                            file_id,
+                            tl.line_no,
+                            tl.module,
+                            _sqlite_int(tl.address),
+                            _sqlite_hex(tl.address),
+                            _sqlite_int(tl.offset),
+                            _sqlite_hex(tl.offset),
+                            opcode,
+                            operands,
+                            tl.insn,
+                            tl.raw,
+                        )
+                    )
+                    parsed_count += 1
+                    reg_rows.extend(_collect_regs(insn_id, tl))
+                    mem_rows.extend(_collect_mem_access(insn_id, tl, opcode, operands))
+
+                    if len(insn_rows) >= IMPORT_BATCH_SIZE:
+                        _flush_batches(conn, insn_rows, reg_rows, mem_rows, parse_error_rows)
+
+                _flush_batches(conn, insn_rows, reg_rows, mem_rows, parse_error_rows)
+
+                conn.execute(
+                    """
+                    UPDATE trace_file
+                    SET line_count = ?, parsed_count = ?, parse_failed_count = ?
+                    WHERE id = ?
+                    """,
+                    (line_count, parsed_count, parse_failed_count, file_id),
+                )
+                _create_indexes(conn)
+
+        os.replace(temp_db, db)
+    except Exception:
+        temp_db.unlink(missing_ok=True)
+        raise
 
     return {
         "db": str(db),
@@ -322,6 +418,8 @@ def query_sql(db_path: str | Path, sql: str, params: Iterable[Any] = (), *, limi
         limited_sql = f"{safe_sql} LIMIT {int(limit)}"
     with closing(_open(db_path)) as conn:
         conn.execute("PRAGMA query_only=ON")
+        conn.create_function("xfq_addr", 1, _sqlite_addr)
+        conn.create_function("xfq_hex", 1, _sqlite_hex)
         return [_row_to_dict(row) for row in conn.execute(limited_sql, tuple(params))]
 
 
@@ -381,8 +479,8 @@ def _rows_to_trace_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "line_no": row["line_no"],
             "module": row["module"],
-            "address": hex(row["address"]),
-            "offset": hex(row["offset"]),
+            "address": _sqlite_hex(row["address"]),
+            "offset": _sqlite_hex(row["offset"]),
             "insn": row["insn"],
             "raw": row["raw"],
         }
@@ -449,6 +547,37 @@ def _fetch_context_after(conn: sqlite3.Connection, file_id: int, end_id: int, co
     return [_row_to_dict(row) for row in rows]
 
 
+def _fixed_opcode(pattern: str) -> str:
+    opcode, _ = _split_insn(pattern)
+    if not opcode or "*" in opcode or "?" in opcode:
+        return ""
+    return opcode.lower()
+
+
+def _sequence_candidate_sql(parts: list[str]) -> tuple[str, list[str]]:
+    joins = [
+        f"JOIN insn s{idx} ON s{idx}.file_id = s0.file_id AND s{idx}.id = s0.id + {idx}"
+        for idx in range(1, len(parts))
+    ]
+    clauses: list[str] = []
+    params: list[str] = []
+    for idx, part in enumerate(parts):
+        opcode = _fixed_opcode(part)
+        if opcode:
+            clauses.append(f"s{idx}.opcode = ?")
+            params.append(opcode)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = f"""
+        SELECT s0.id, s0.file_id, s0.line_no, s0.module, s0.address, s0.offset,
+               s0.opcode, s0.operands, s0.insn, s0.raw
+        FROM insn s0
+        {' '.join(joins)}
+        {where}
+        ORDER BY s0.file_id, s0.id
+    """
+    return sql, params
+
+
 def query_sequence(
     db_path: str | Path,
     pattern: str,
@@ -456,26 +585,20 @@ def query_sequence(
     context: int = 0,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """基于索引查询相邻指令序列。第一版覆盖相邻匹配。"""
+    """基于索引查询相邻指令序列，先用 opcode SQL 预筛，再做完整模式匹配。"""
     parts = [part.strip() for part in pattern.split(";") if part.strip()]
     if not parts:
         raise ValueError("序列模式不能为空")
-
-    first_opcode, _ = _split_insn(parts[0].replace("*", ""))
-    opcode_filter = first_opcode if first_opcode and "*" not in first_opcode and "?" not in first_opcode else ""
-    candidates_sql = """
-        SELECT id, file_id, line_no, module, address, offset, opcode, operands, insn, raw
-        FROM insn
-        {where}
-        ORDER BY file_id, line_no
-        LIMIT ?
-    """
-    where = "WHERE opcode = ?" if opcode_filter else ""
-    params: list[Any] = [opcode_filter, max(limit * 20, 200)] if opcode_filter else [max(limit * 20, 200)]
+    if len(parts) > MAX_SEQUENCE_PARTS:
+        raise ValueError(
+            f"序列长度过长 ({len(parts)} 段)，当前索引查询最多支持 {MAX_SEQUENCE_PARTS} 段；"
+            "请缩短模式或先用 query/sql 缩小范围。"
+        )
 
     results: list[dict[str, Any]] = []
     with closing(_open(db_path)) as conn:
-        for candidate in conn.execute(candidates_sql.format(where=where), params):
+        candidates_sql, params = _sequence_candidate_sql(parts)
+        for candidate in conn.execute(candidates_sql, params):
             base = _row_to_dict(candidate)
             seq_rows = _fetch_insn_sequence_by_id(conn, base["file_id"], base["id"], len(parts))
             if len(seq_rows) != len(parts):

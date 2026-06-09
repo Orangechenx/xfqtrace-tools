@@ -72,8 +72,8 @@ xfq add /path/to/new/libxfqtrace.so
 │  xfq doctor | info | gen-config | run        │
 │  xfq pull-only | list-logs | preview         │
 │  xfq grep | search-seq | taint | branch      │
-│  xfq index | query | query-reg | query-op     │
-│  xfq logcat | mcp                            │
+│  xfq diff | index | query | query-reg        │
+│  xfq query-op | query-seq | logcat | mcp     │
 ├─────────────────────────────────────────────┤
 │  xfqtrace.core     核心业务逻辑              │
 │  xfqtrace.device   adb + frida 设备管理      │
@@ -88,7 +88,7 @@ xfq add /path/to/new/libxfqtrace.so
 └─────────────────────────────────────────────┘
 ```
 
-**设计原则：** 不依赖 `import frida`，全程 subprocess 调系统 `frida` CLI，无版本匹配问题。
+**设计原则：** Python 侧不依赖 `import frida`，全程 subprocess 调系统 `frida` CLI；但内置 `libxfqtrace.so` 依赖特定 frida-gum ABI，推荐 `frida/frida-server 16.2.1`。
 
 ## 命令
 
@@ -100,7 +100,7 @@ xfq add /path/to/new/libxfqtrace.so
 | `add` | 将 libxfqtrace.so 复制到包内 _vendor/ 目录 |
 | **Trace 执行** | |
 | `gen-config` | 生成 Frida hook 脚本 |
-| `run` | 执行 trace（默认 dry-run） |
+| `run` | 执行 trace（默认 dry-run；真实执行前会清理远端旧 trace） |
 | `pull-only` | 仅拉取设备 trace 日志 |
 | `list-logs` | 列出本地日志 |
 | `preview-log` | 预览日志内容 |
@@ -115,6 +115,7 @@ xfq add /path/to/new/libxfqtrace.so
 | `mempat` | 内存访问模式检测 — 识别连续内存拷贝/置零 |
 | `branch` | 分支命中率分析 — 条件跳转统计 |
 | `taint` | 污点分析 — 标记输入，跟踪数据传播路径 |
+| `diff` | 多 trace 对比 — 覆盖差异和首个顺序分歧 |
 | `index` | SQLite 索引 — 将 trace 导入本地结构化索引库 |
 | `query` | SQL 查询 — 对索引库执行只读 SELECT |
 | `query-reg` | 索引查询 — 快速查寄存器写入/访问 |
@@ -223,14 +224,21 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 | `xfqtrace_mempat` | 内存访问模式检测 |
 | `xfqtrace_branch` | 分支命中率分析 |
 | `xfqtrace_taint` | 污点传播分析 |
+| `xfqtrace_diff` | 多 trace 覆盖和顺序差异对比 |
 
 ## 分析能力补充
 
 - `.log` 和 `.log.lz4` 均可直接分析，LZ4 文件会流式读取，无需手动解压。
 - `summarize`、`grep`、`search-seq`、`mempat`、`branch`、`taint` 等核心分析尽量流式扫描，避免大 trace 全量载入内存。
 - `slice --max` 会在写满后停止读取；JSON 中 `truncated=true` 且 `total_lines_exact=false` 表示没有继续统计剩余行数。
-- `branch` 默认按 AArch64 4 字节指令估算 fallthrough；遇到 Thumb 标记或可推断 Thumb 场景时会标注 `thumb_inferred_2_bytes`。
-- `index` 会把 trace 导入 SQLite，生成的 `trace.db` 是可删除重建的查询索引，不替代原始日志。
+- `branch` 默认按 AArch64 4 字节指令估算 fallthrough；遇到 Thumb 标记或可推断 Thumb 场景时会标注 `thumb_inferred_2_bytes`。如果下一条 trace 既不是 fallthrough 也不是显式 target，会计入 `unknown`，避免把 trace 间隙误算为 taken。
+- `taint` 的内存污点按字节地址记录，`strb/strh/str/stp/ldp` 会按访问宽度传播；JSON 会报告非指令/异常行和 SIMD/FP 未建模指令，避免无声丢失精度。
+- `diff` 用于比较两个 trace 的覆盖差异、opcode/module 分布和首个顺序分歧，适合对比不同输入或不同 run。
+- `index` 会把 trace 批量导入 SQLite，生成的 `trace.db` 是可删除重建的查询索引，不替代原始日志；导入写入临时库，成功后原子替换目标 DB。
+- `index` 中 ARM64 高地址会按 SQLite signed 64-bit 存储，同时提供 `address_uhex`/`offset_uhex` 文本列。自定义 SQL 比较无符号地址时可用 `xfq_addr('0xfffffffffffffff0')`，展示 signed 地址时可用 `xfq_hex(address)`。
+- MCP 已暴露 `xfqtrace_index`、`xfqtrace_query`、`xfqtrace_query_reg`、`xfqtrace_query_op`、`xfqtrace_query_sequence`，AI 客户端可以直接建立索引并查询本地 trace 数据库。
+- `doctor` 会提示推荐 Frida 版本。当前内置引擎推荐 `frida/frida-server 16.2.1`；更换 Frida 版本可能需要重新编译引擎 SO。
+- Windows 下可使用包内 `_vendor/lz4.exe` 读取 `.lz4`；其他平台优先使用 PATH 中的 `lz4`。
 
 ## 致谢
 
