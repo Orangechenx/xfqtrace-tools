@@ -27,7 +27,8 @@
    - [branch](#49-branch--分支命中率分析)
    - [taint](#410-taint--污点分析)
    - [index / query](#411-index--query--sqlite-索引查询)
-   - [diff](#412-diff--多-trace-差异对比)
+   - [index-cache / insights](#412-index-cache--insights--trace-ui-式离线洞察)
+   - [diff](#413-diff--多-trace-差异对比)
 5. [配置详解](#5-配置详解)
 6. [实战场景](#6-实战场景)
 7. [MCP Server 配置](#7-mcp-server-配置)
@@ -696,7 +697,42 @@ WHERE opcode = 'ldr';
 
 相比直接 `grep/search-seq`，索引查询的优势是“导入一次，多次复用解析结果”。如果只查一次小日志，直接用原有命令更简单；如果是几百 MB 或 GB 级日志反复探索，优先建索引。
 
-### 4.12 diff — 多 trace 差异对比
+### 4.12 index-cache / insights — trace-ui 式离线洞察
+
+这一组能力借鉴 trace-ui 的“先打开/索引 trace，再围绕 trace 做交互分析”思路，但保持 CLI/MCP 形态，不引入 GUI 依赖。
+
+```bash
+# 按 trace 路径、大小、mtime 生成稳定缓存名；匹配时直接复用
+xfq index-cache trace.log --json
+
+# 查询寄存器定义点和使用点
+xfq defuse trace.db --reg x0 --line 200 --json
+
+# 从目标寄存器反向追依赖，输出轻量 DAG
+xfq depgraph trace.db --reg x0 --line 200 --json
+
+# 提取 trace 里可见字符串和 xrefs
+xfq strings trace.log --min-length 5 --json
+
+# 扫描常见 crypto opcode/常量线索
+xfq crypto-scan trace.log --json
+
+# 结合 call func/ret 和 bl/blr/ret 生成调用事件流
+xfq calltree trace.log --json
+```
+
+当前实现是轻量静态洞察，不做完整指令模拟：
+
+| 命令 | 说明 |
+|---|---|
+| `index-cache` | 用缓存 DB 避免重复导入同一个 trace |
+| `defuse` | 基于 `reg_access` / `mem_access` 查询定义点和使用点 |
+| `depgraph` | 从目标寄存器或内存地址向前追踪依赖，输出 `nodes` / `edges` |
+| `strings` | 提取 trace 文本中可见字符串，并保留行号交叉引用 |
+| `crypto-scan` | 扫描 AES/SHA/CRC32 指令和 TEA/MD5/SHA 常量等线索 |
+| `calltree` | 输出调用/返回事件流，适合粗看控制流，不替代完整反汇编调用图 |
+
+### 4.13 diff — 多 trace 差异对比
 
 对比两个 trace 的指令覆盖、opcode/module 分布和首个顺序分歧。适合比较不同输入、不同 run 或修复前后的执行路径。
 
@@ -1002,10 +1038,19 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 | `xfqtrace_query_reg` | 按寄存器访问查询索引库 |
 | `xfqtrace_query_op` | 按 opcode/module 查询索引库 |
 | `xfqtrace_query_sequence` | 基于索引查询相邻指令序列 |
+| `xfqtrace_open_trace` | 打开 trace 并建立/复用缓存索引，返回 `session_id` |
+| `xfqtrace_close_trace` | 关闭 trace session |
+| `xfqtrace_get_trace_lines` | 基于 session/db 读取指令窗口 |
+| `xfqtrace_defuse` | 查询寄存器/内存 DEF/USE |
+| `xfqtrace_backward_slice` | 反向依赖切片，输出轻量 DAG |
+| `xfqtrace_strings` | 提取可见字符串和 xrefs |
+| `xfqtrace_crypto_scan` | 扫描 crypto opcode/常量线索 |
+| `xfqtrace_call_tree` | 输出调用事件流 |
 
 分析类 MCP 工具支持直接传 `text`、传 `input` 文件路径，或传 `package` 自动解析本地日志；当同一包有多个 run 时可用 `run_id` 指定目录。
 `xfqtrace_diff` 是双输入工具，支持 `left/right` 路径或 `left_text/right_text` 文本，并支持 `ignore_operands`、`include_calls` 和 `max_samples`。
 数据库类 MCP 工具直接复用 CLI 的 SQLite 索引能力：先用 `xfqtrace_index` 建库，再用 `xfqtrace_query` / `xfqtrace_query_reg` / `xfqtrace_query_op` / `xfqtrace_query_sequence` 查询。
+会话式 MCP 工具推荐先调用 `xfqtrace_open_trace`，后续用返回的 `session_id` 调 `xfqtrace_get_trace_lines`、`xfqtrace_defuse`、`xfqtrace_backward_slice`、`xfqtrace_strings` 等，避免每个工具重复解析路径和重建索引。
 
 ---
 

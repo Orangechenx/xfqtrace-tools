@@ -37,6 +37,15 @@ from .trace_branch import branch_analysis
 from .trace_taint import taint_analysis, format_taint_result
 from .trace_index import index_trace, query_op, query_reg, query_sequence as query_index_sequence, query_sql
 from .trace_diff import diff_traces
+from .trace_insights import (
+    backward_slice,
+    build_instruction_call_tree,
+    ensure_index_cache,
+    extract_strings,
+    get_trace_lines,
+    query_defuse,
+    scan_crypto_signatures,
+)
 
 __all__ = [
     "LARGE_TRACE_WARNING_BYTES",
@@ -50,7 +59,9 @@ __all__ = [
     "_parse_int_literal",
     "_reg_canonical",
     "branch_analysis",
+    "backward_slice",
     "build_stack",
+    "build_instruction_call_tree",
     "detect_mem_copy",
     "detect_memory_access_patterns_stream",
     "detect_sequential_access",
@@ -60,6 +71,9 @@ __all__ = [
     "format_stack_tree",
     "format_taint_result",
     "grep",
+    "ensure_index_cache",
+    "extract_strings",
+    "get_trace_lines",
     "index_trace",
     "iter_lines",
     "iter_raw_lines",
@@ -67,6 +81,7 @@ __all__ = [
     "parse_line",
     "parse_reg_condition",
     "query_index_sequence",
+    "query_defuse",
     "query_op",
     "query_reg",
     "query_sql",
@@ -74,6 +89,7 @@ __all__ = [
     "regdiff",
     "resolve_trace_file",
     "search_sequence",
+    "scan_crypto_signatures",
     "slice_trace",
     "stats",
     "summarize",

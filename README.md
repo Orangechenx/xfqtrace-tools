@@ -121,6 +121,12 @@ xfq add /path/to/new/libxfqtrace.so
 | `query-reg` | 索引查询 — 快速查寄存器写入/访问 |
 | `query-op` | 索引查询 — 快速查 opcode/module |
 | `query-seq` | 索引查询 — 快速查相邻指令序列 |
+| `index-cache` | 索引缓存 — 按 trace 元数据复用 SQLite 索引 |
+| `defuse` | DEF/USE — 查询寄存器或内存地址定义/使用点 |
+| `depgraph` | 反向依赖 — 从目标寄存器/地址生成轻量 DAG |
+| `strings` | 字符串线索 — 提取可见字符串和 xrefs |
+| `crypto-scan` | Crypto 线索 — 扫描 AES/SHA/CRC/TEA/MD5 等 opcode/常量 |
+| `calltree` | 调用事件 — 结合 hook call/ret 和 bl/blr/ret |
 | **MCP** | |
 | `logcat` | 输出 logcat 监控命令 |
 | `mcp` | 启动 MCP Server |
@@ -236,7 +242,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | xfq mcp
 - `diff` 用于比较两个 trace 的覆盖差异、opcode/module 分布和首个顺序分歧，适合对比不同输入或不同 run。
 - `index` 会把 trace 批量导入 SQLite，生成的 `trace.db` 是可删除重建的查询索引，不替代原始日志；导入写入临时库，成功后原子替换目标 DB。
 - `index` 中 ARM64 高地址会按 SQLite signed 64-bit 存储，同时提供 `address_uhex`/`offset_uhex` 文本列。自定义 SQL 比较无符号地址时可用 `xfq_addr('0xfffffffffffffff0')`，展示 signed 地址时可用 `xfq_hex(address)`。
-- MCP 已暴露 `xfqtrace_index`、`xfqtrace_query`、`xfqtrace_query_reg`、`xfqtrace_query_op`、`xfqtrace_query_sequence`，AI 客户端可以直接建立索引并查询本地 trace 数据库。
+- `index-cache`、`defuse`、`depgraph`、`strings`、`crypto-scan`、`calltree` 借鉴 trace-ui 的分析形态，但以 CLI/MCP 形式落地，适合先做离线算法还原。
+- MCP 已暴露 `xfqtrace_open_trace` 会话入口，以及 `xfqtrace_get_trace_lines`、`xfqtrace_defuse`、`xfqtrace_backward_slice`、`xfqtrace_strings`、`xfqtrace_crypto_scan`、`xfqtrace_call_tree` 等工具；AI 客户端可以先打开 trace，再复用同一个 session 查询。
 - `doctor` 会提示推荐 Frida 版本。当前内置引擎推荐 `frida/frida-server 16.2.1`；更换 Frida 版本可能需要重新编译引擎 SO。
 - Windows 下可使用包内 `_vendor/lz4.exe` 读取 `.lz4`；其他平台优先使用 PATH 中的 `lz4`。
 

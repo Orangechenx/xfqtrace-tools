@@ -123,6 +123,8 @@ class XfqtraceMcpServer:
         self.core = core
         self.server = Server("xfqtrace-mcp")
         self._analysis_source_cache: dict[tuple[str, str, int], list[Path]] = {}
+        self._trace_sessions: dict[str, dict[str, Any]] = {}
+        self._next_session_id = 1
 
     def serve(self) -> None:
         self._register_tools()
@@ -411,6 +413,108 @@ class XfqtraceMcpServer:
                     "required": ["db", "seq"],
                 },
             ),
+            Tool(
+                name="xfqtrace_open_trace",
+                description="打开 trace 并建立/复用 SQLite 缓存索引，返回 session_id 供后续 MCP 查询复用。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "cache_dir": {"type": "string", "description": "索引缓存目录"},
+                        "db": {"type": "string", "description": "指定 SQLite 索引库路径"},
+                        "replace": {"type": "boolean", "default": False},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_close_trace",
+                description="关闭 MCP trace session；不会删除索引缓存文件。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"session_id": {"type": "string"}},
+                    "required": ["session_id"],
+                },
+            ),
+            Tool(
+                name="xfqtrace_get_trace_lines",
+                description="从已打开的 session 或 db 中读取指令窗口。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "db": {"type": "string"},
+                        "start_line": {"type": "integer", "default": 1},
+                        "count": {"type": "integer", "default": 50},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_defuse",
+                description="查询寄存器/内存地址 DEF/USE。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "db": {"type": "string"},
+                        "reg": {"type": "string"},
+                        "address": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "max_results": {"type": "integer", "default": 50},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_backward_slice",
+                description="从目标寄存器/内存地址反向追踪依赖，输出轻量 DAG。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "db": {"type": "string"},
+                        "reg": {"type": "string"},
+                        "address": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "max_depth": {"type": "integer", "default": 50},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_strings",
+                description="提取 trace 中可见字符串及交叉引用。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "session_id": {"type": "string"},
+                        "min_length": {"type": "integer", "default": 4},
+                        "max_results": {"type": "integer", "default": 200},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_crypto_scan",
+                description="扫描常见 crypto opcode/常量线索。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "session_id": {"type": "string"},
+                        "max_results": {"type": "integer", "default": 200},
+                    },
+                },
+            ),
+            Tool(
+                name="xfqtrace_call_tree",
+                description="基于 hook call/ret 和 bl/blr/ret 指令生成调用事件流。",
+                inputSchema={
+                    **self._analysis_schema(),
+                    "properties": {
+                        **self._analysis_schema()["properties"],
+                        "session_id": {"type": "string"},
+                        "max_events": {"type": "integer", "default": 500},
+                    },
+                },
+            ),
         ]
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
@@ -574,6 +678,64 @@ class XfqtraceMcpServer:
                     limit=int(arguments.get("max_results", 50)),
                 )
                 result = {"matches": len(rows), "results": rows}
+            elif name == "xfqtrace_open_trace":
+                result = self._open_trace_session(arguments)
+            elif name == "xfqtrace_close_trace":
+                session_id = str(arguments.get("session_id") or "").strip()
+                if not session_id:
+                    raise XfqtraceError("必须提供 session_id")
+                existed = self._trace_sessions.pop(session_id, None) is not None
+                result = {"session_id": session_id, "closed": existed}
+            elif name == "xfqtrace_get_trace_lines":
+                from .trace_insights import get_trace_lines
+                db_path = self._session_db(arguments)
+                result = get_trace_lines(
+                    db_path,
+                    start_line=int(arguments.get("start_line", 1)),
+                    count=int(arguments.get("count", 50)),
+                )
+            elif name == "xfqtrace_defuse":
+                from .trace_insights import query_defuse
+                db_path = self._session_db(arguments)
+                result = query_defuse(
+                    db_path,
+                    reg=arguments.get("reg"),
+                    address=arguments.get("address"),
+                    line=int(arguments["line"]) if arguments.get("line") is not None else None,
+                    limit=int(arguments.get("max_results", 50)),
+                )
+            elif name == "xfqtrace_backward_slice":
+                from .trace_insights import backward_slice
+                db_path = self._session_db(arguments)
+                result = backward_slice(
+                    db_path,
+                    reg=arguments.get("reg"),
+                    address=arguments.get("address"),
+                    line=int(arguments["line"]) if arguments.get("line") is not None else None,
+                    max_depth=int(arguments.get("max_depth", 50)),
+                )
+            elif name == "xfqtrace_strings":
+                from .trace_insights import extract_strings
+                source = self._insight_source(arguments)
+                result = extract_strings(
+                    **source,
+                    min_length=int(arguments.get("min_length", 4)),
+                    limit=int(arguments.get("max_results", 200)),
+                )
+            elif name == "xfqtrace_crypto_scan":
+                from .trace_insights import scan_crypto_signatures
+                source = self._insight_source(arguments)
+                result = scan_crypto_signatures(
+                    **source,
+                    limit=int(arguments.get("max_results", 200)),
+                )
+            elif name == "xfqtrace_call_tree":
+                from .trace_insights import build_instruction_call_tree
+                source = self._insight_source(arguments)
+                result = build_instruction_call_tree(
+                    **source,
+                    max_events=int(arguments.get("max_events", 500)),
+                )
             else:
                 raise XfqtraceError(f"未知工具: {name}")
 
@@ -590,6 +752,57 @@ class XfqtraceMcpServer:
                 content=[TextContent(type="text", text=f"执行失败: {e}")],
                 isError=True,
             )
+
+    def _open_trace_session(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .trace_insights import ensure_index_cache
+
+        source = self._analysis_source(arguments)
+        paths = source.get("paths")
+        if not paths:
+            raise XfqtraceError("open_trace 需要 input/package 指向本地 trace 文件，暂不支持纯 text session")
+        trace_path = Path(paths[0]).resolve()
+        indexed = ensure_index_cache(
+            trace_path,
+            cache_dir=arguments.get("cache_dir"),
+            db_path=arguments.get("db"),
+            replace=bool(arguments.get("replace", False)),
+        )
+        session_id = f"trace-{self._next_session_id}"
+        self._next_session_id += 1
+        self._trace_sessions[session_id] = {
+            "trace_path": str(trace_path),
+            "db": indexed["db"],
+            "opened_at_index_reused": indexed["reused"],
+        }
+        return {
+            "session_id": session_id,
+            "trace_path": str(trace_path),
+            **indexed,
+        }
+
+    def _session_db(self, arguments: dict[str, Any]) -> str:
+        session_id = str(arguments.get("session_id") or "").strip()
+        if session_id:
+            session = self._trace_sessions.get(session_id)
+            if not session:
+                raise XfqtraceError(f"session_id 不存在: {session_id}")
+            return str(session["db"])
+        db_path = str(arguments.get("db") or "").strip()
+        if db_path:
+            return db_path
+        raise XfqtraceError("必须提供 session_id 或 db")
+
+    def _insight_source(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(arguments.get("session_id") or "").strip()
+        if session_id:
+            session = self._trace_sessions.get(session_id)
+            if not session:
+                raise XfqtraceError(f"session_id 不存在: {session_id}")
+            trace_path = session.get("trace_path")
+            if not trace_path:
+                raise XfqtraceError(f"session 无原始 trace 路径: {session_id}")
+            return {"paths": [Path(str(trace_path))]}
+        return self._analysis_source(arguments)
 
     @staticmethod
     def _analysis_schema() -> dict[str, Any]:

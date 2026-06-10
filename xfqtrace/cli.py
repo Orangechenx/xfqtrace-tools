@@ -979,6 +979,158 @@ def query_seq_cmd(
         raise typer.Exit(1)
 
 
+# ── insights ────────────────────────────────────────────────────
+
+@app.command(name="index-cache")
+def index_cache_cmd(
+    input: str = typer.Argument(..., help="trace 日志文件路径，支持 .log / .log.lz4"),
+    cache_dir: Optional[str] = typer.Option(None, "--cache-dir", help="索引缓存目录，默认 trace 同目录 .xfq-index"),
+    db: Optional[str] = typer.Option(None, "--db", help="指定 SQLite 索引库路径"),
+    replace: bool = typer.Option(False, "--replace", help="强制重建缓存"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """建立或复用 trace SQLite 缓存索引。"""
+    try:
+        from .trace_insights import ensure_index_cache
+        result = ensure_index_cache(input, cache_dir=cache_dir, db_path=db, replace=replace)
+        if json_output:
+            print_json(result)
+            return
+        state = "复用" if result["reused"] else "新建"
+        print(f"{state}索引: {result['parsed_count']:,}/{result['line_count']:,} 行 -> {result['db']}")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="defuse")
+def defuse_cmd(
+    db: str = typer.Argument(..., help="SQLite 索引库路径"),
+    reg: Optional[str] = typer.Option(None, "--reg", help="目标寄存器，如 x0"),
+    address: Optional[str] = typer.Option(None, "--address", help="目标内存地址，如 0x7000"),
+    line: Optional[int] = typer.Option(None, "--line", help="以该行作为上下文分界"),
+    max_results: int = typer.Option(50, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """查询目标寄存器/内存地址的 DEF/USE。"""
+    try:
+        from .trace_insights import query_defuse
+        result = query_defuse(db, reg=reg, address=address, line=line, limit=max_results)
+        if json_output:
+            print_json(result)
+            return
+        print(f"目标: {result['target']}")
+        print(f"定义点: {len(result['definitions'])}")
+        for item in result["definitions"][:10]:
+            print(f"  DEF L{item['line_no']}: {item['insn']}")
+        print(f"使用点: {len(result['uses'])}")
+        for item in result["uses"][:10]:
+            print(f"  USE L{item['line_no']}: {item['insn']}")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="depgraph")
+def depgraph_cmd(
+    db: str = typer.Argument(..., help="SQLite 索引库路径"),
+    reg: Optional[str] = typer.Option(None, "--reg", help="目标寄存器，如 x0"),
+    address: Optional[str] = typer.Option(None, "--address", help="目标内存地址，如 0x7000"),
+    line: Optional[int] = typer.Option(None, "--line", help="从该行开始反向追踪"),
+    max_depth: int = typer.Option(50, "--max-depth", help="最大依赖节点数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """反向依赖切片，输出轻量 DAG。"""
+    try:
+        from .trace_insights import backward_slice
+        result = backward_slice(db, reg=reg, address=address, line=line, max_depth=max_depth)
+        if json_output:
+            print_json(result)
+            return
+        print(f"目标: {result['target']}")
+        print(f"节点: {len(result['nodes'])}, 边: {len(result['edges'])}")
+        for node in result["nodes"][:20]:
+            print(f"  L{node['line_no']}: {node['insn']}  def={node['defines']} use={node['uses']}")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="strings")
+def strings_cmd(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    min_length: int = typer.Option(4, "--min-length", help="最短字符串长度"),
+    max_results: int = typer.Option(200, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """提取 trace 中可见字符串及交叉引用。"""
+    try:
+        from .trace_insights import extract_strings
+        paths = _resolve_path(input, tool_root, log_dir)
+        result = extract_strings(paths=paths, min_length=min_length, limit=max_results)
+        if json_output:
+            print_json(result)
+            return
+        for item in result["strings"][:30]:
+            first = item["xrefs"][0]
+            print(f"  L{first['line_no']:<6} {item['value']}")
+        print(f"\n共 {result['matches']} 个字符串")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="crypto-scan")
+def crypto_scan_cmd(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    max_results: int = typer.Option(200, "--max", help="最大结果数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """扫描常见 crypto opcode/常量线索。"""
+    try:
+        from .trace_insights import scan_crypto_signatures
+        paths = _resolve_path(input, tool_root, log_dir)
+        result = scan_crypto_signatures(paths=paths, limit=max_results)
+        if json_output:
+            print_json(result)
+            return
+        for item in result["matches"][:50]:
+            print(f"  L{item['line_no']:<6} {item['algorithm']:<10} {item['kind']:<8} {item['pattern']}  {item.get('insn', '')}")
+        print(f"\n共 {result['count']} 个 crypto 线索")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command(name="calltree")
+def calltree_cmd(
+    input: Optional[str] = typer.Argument(None, help=PKG_OR_FILE_HELP),
+    tool_root: Optional[str] = typer.Option(None, "--tool-root"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir"),
+    max_events: int = typer.Option(500, "--max", help="最大事件数"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+):
+    """基于 hook call/ret 和 bl/blr/ret 指令生成调用事件流。"""
+    try:
+        from .trace_insights import build_instruction_call_tree
+        paths = _resolve_path(input, tool_root, log_dir)
+        result = build_instruction_call_tree(paths=paths, max_events=max_events)
+        if json_output:
+            print_json(result)
+            return
+        for event in result["events"][:100]:
+            indent = "  " * int(event["depth"])
+            print(f"{indent}{event['type']} L{event['line_no']}: {event['name']}")
+        print(f"\n共 {result['count']} 个调用事件")
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
 # ── diff ────────────────────────────────────────────────────────
 
 @app.command(name="diff")
